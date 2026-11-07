@@ -1,0 +1,667 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manifest",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/Spec"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "$defs": {
+    "Concurrency": {
+      "type": "object",
+      "properties": {
+        "maxActive": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mode": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "maxActive"
+      ]
+    },
+    "DockerSpec": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string"
+        },
+        "memoryBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "network": {
+          "type": "string"
+        },
+        "pidsLimit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "user",
+        "network",
+        "memoryBytes",
+        "pidsLimit"
+      ]
+    },
+    "Execution": {
+      "type": "object",
+      "properties": {
+        "adapter": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": "string",
+          "default": ""
+        },
+        "docker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DockerSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "limits": {
+          "$ref": "#/$defs/ResourceLimits",
+          "default": {
+            "cpuSeconds": null,
+            "memoryBytes": null,
+            "openFiles": null,
+            "processes": null
+          }
+        },
+        "sandbox": {
+          "type": "string",
+          "default": "default"
+        },
+        "secretRefs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SecretRef"
+          },
+          "default": {}
+        },
+        "systemd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SystemdSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "workingDirectory": {
+          "type": "string",
+          "default": "/tmp"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "adapter"
+      ]
+    },
+    "LegacyRestart": {
+      "type": "object",
+      "properties": {
+        "maxAttempts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "policy": {
+          "type": "string"
+        },
+        "windowSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "maxAttempts",
+        "windowSeconds"
+      ]
+    },
+    "LegacyShutdown": {
+      "type": "object",
+      "properties": {
+        "graceSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "graceSeconds"
+      ]
+    },
+    "Logs": {
+      "type": "object",
+      "properties": {
+        "maxDiskBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 268435456,
+          "minimum": 0
+        },
+        "maxRunBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxSegments": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1024,
+          "minimum": 0
+        },
+        "retentionSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 604800,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "maxRunBytes"
+      ]
+    },
+    "Metadata": {
+      "type": "object",
+      "properties": {
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "namespace"
+      ]
+    },
+    "Misfire": {
+      "type": "object",
+      "properties": {
+        "latenessGraceSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxAgeSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxOccurrences": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "policy": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "latenessGraceSeconds",
+        "maxAgeSeconds",
+        "maxOccurrences"
+      ]
+    },
+    "Probe": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": "string"
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "intervalSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "successThreshold": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "intervalSeconds",
+        "timeoutSeconds"
+      ]
+    },
+    "ResourceLimits": {
+      "type": "object",
+      "properties": {
+        "cpuSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "memoryBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "openFiles": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "processes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Retry": {
+      "type": "object",
+      "properties": {
+        "backoffSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 0
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "policy": {
+          "type": "string",
+          "default": "never"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "maxAttempts"
+      ]
+    },
+    "Schedule": {
+      "type": "object",
+      "properties": {
+        "anchorAtUs": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "expression": {
+          "type": "string",
+          "default": ""
+        },
+        "fold": {
+          "type": "string",
+          "default": "first"
+        },
+        "gap": {
+          "type": "string",
+          "default": "skip"
+        },
+        "intervalSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "misfire": {
+          "$ref": "#/$defs/Misfire",
+          "default": {
+            "latenessGraceSeconds": 60,
+            "maxAgeSeconds": 3600,
+            "maxOccurrences": 1,
+            "policy": "skip"
+          }
+        },
+        "timezone": {
+          "type": "string",
+          "default": "UTC"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "SecretRef": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string",
+              "const": "env"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "path"
+          ]
+        }
+      ]
+    },
+    "Service": {
+      "type": "object",
+      "properties": {
+        "backoffSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 0
+        },
+        "desiredState": {
+          "type": "string",
+          "default": "RUNNING"
+        },
+        "liveness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Probe"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "maxBackoffSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "maxRestarts": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Probe"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resetAfterSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "restart": {
+          "type": "string",
+          "default": "on-failure"
+        },
+        "restartOnUnhealthy": {
+          "type": "boolean",
+          "default": false
+        },
+        "startupGraceSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        },
+        "stopGraceSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 0
+        },
+        "windowSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Spec": {
+      "type": "object",
+      "properties": {
+        "concurrency": {
+          "$ref": "#/$defs/Concurrency",
+          "default": {
+            "maxActive": 1,
+            "mode": "forbid"
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "logs": {
+          "$ref": "#/$defs/Logs",
+          "default": {
+            "maxDiskBytes": 268435456,
+            "maxRunBytes": 10485760,
+            "maxSegments": 1024,
+            "retentionSeconds": 604800
+          }
+        },
+        "owner": {
+          "type": "string"
+        },
+        "restart": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LegacyRestart"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "backoffSeconds": 1,
+            "maxAttempts": 1,
+            "policy": "never"
+          }
+        },
+        "schedule": {
+          "$ref": "#/$defs/Schedule",
+          "default": {
+            "anchorAtUs": 0,
+            "expression": "* * * * *",
+            "fold": "first",
+            "gap": "skip",
+            "intervalSeconds": 0,
+            "misfire": {
+              "latenessGraceSeconds": 60,
+              "maxAgeSeconds": 3600,
+              "maxOccurrences": 1,
+              "policy": "skip"
+            },
+            "timezone": "UTC",
+            "type": "cron"
+          }
+        },
+        "service": {
+          "$ref": "#/$defs/Service",
+          "default": {
+            "backoffSeconds": 1,
+            "desiredState": "RUNNING",
+            "liveness": null,
+            "maxBackoffSeconds": 60,
+            "maxRestarts": 5,
+            "readiness": null,
+            "resetAfterSeconds": 300,
+            "restart": "on-failure",
+            "restartOnUnhealthy": false,
+            "startupGraceSeconds": 10,
+            "stopGraceSeconds": 1,
+            "windowSeconds": 300
+          }
+        },
+        "shutdown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LegacyShutdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 86400,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "enabled",
+        "execution"
+      ]
+    },
+    "SystemdSpec": {
+      "type": "object",
+      "properties": {
+        "unit": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "unit"
+      ]
+    }
+  }
+}

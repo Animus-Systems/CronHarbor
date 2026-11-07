@@ -1,0 +1,46 @@
+[package]
+name = "cronharbor"
+version = "0.1.0"
+default-run = "cronharbor"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+description = "Single-node scheduler and service control plane"
+
+[features]
+default = []
+api = ["dep:axum", "dep:tokio", "dep:tokio-stream", "dep:tower", "dep:tower-http"]
+mcp = ["dep:rmcp", "dep:tokio"]
+full = ["api", "mcp"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chrono-tz = "0.10.4"
+clap = { version = "4", features = ["derive"] }
+croner = "4.0.3"
+nix = { version = "0.30", features = ["signal", "process", "user", "socket"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10.0"
+sha2 = "0.10"
+signal-hook = "0.3"
+uuid = { version = "1", features = ["v4"] }
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+schemars = { version = "1", features = ["derive"] }
+axum = { version = "0.8.9", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "io-std", "io-util"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+tower = { version = "0.5", features = ["util", "limit", "timeout"], optional = true }
+tower-http = { version = "0.6", features = ["cors", "fs", "limit", "set-header"], optional = true }
+rmcp = { version = "3.9.0", features = ["server", "macros", "schemars", "transport-io"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"

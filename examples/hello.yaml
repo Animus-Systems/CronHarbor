@@ -1,0 +1,33 @@
+apiVersion: cronharbor.dev/v1
+kind: ScheduledJob
+metadata:
+  name: hello
+  namespace: local
+spec:
+  owner: file
+  enabled: true
+  schedule:
+    type: cron
+    expression: "* * * * *"
+    timezone: UTC
+    fold: first
+    gap: skip
+    misfire:
+      policy: skip
+      latenessGraceSeconds: 60
+      maxAgeSeconds: 3600
+      maxOccurrences: 1
+  execution:
+    adapter: process
+    command: /bin/echo
+    args: ["Hello from CronHarbor"]
+    workingDirectory: /tmp
+    sandbox: default
+  concurrency:
+    mode: forbid
+    maxActive: 1
+  timeoutSeconds: 5
+  retry:
+    maxAttempts: 1
+  logs:
+    maxRunBytes: 4096

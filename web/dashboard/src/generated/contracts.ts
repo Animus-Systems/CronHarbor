@@ -1,0 +1,20 @@
+// Generated from src/contracts.rs. Do not edit.
+export type Role = "viewer" | "operator" | "editor" | "admin" | "observe";
+export type PrincipalDto = { actor_id: string, role: Role, namespaces: Array<string>, capabilities: Array<string>, };
+export type AdapterHealthDto = { adapter: string, enabled: boolean, state: string, last_observed_at_us: number | null, detail: string, };
+export type ProbeEventDto = { kind: string, healthy: boolean, observed_at_us: number, };
+export type PreviewInstantDto = { utc_us: number, local: string, };
+export type PreviewDto = { items: Array<PreviewInstantDto>, timezone: string, };
+export type ValidationDto = { valid: boolean, revision_hash: string, };
+export type AuditDto = { seq: number, actor_id: string, action: string, target_id: string | null, result: string, request_id: string, created_at_us: number, };
+export type WorkloadDto = { id: string, namespace: string, name: string, kind: string, source_kind: string, revision_id: string, enabled: boolean, paused: boolean, executor: string, schedule_description: string | null, next_due_at_us: number | null, desired_state: string | null, observed_state: string | null, restart_count: number, definition: string, probe_history: Array<ProbeEventDto>, };
+export type StatusDto = { sqlite_version: string, workloads: number, active: number, unknown: number, paused: boolean, restore_required: boolean, adapter_health: Array<AdapterHealthDto>, };
+export type ExecutionDto = { execution_id: string, attempt_id: string, workload_id: string, namespace: string, name: string, state: string, due_at_us: number | null, started_at_us: number | null, finished_at_us: number | null, error_code: string | null, exit_code: number | null, log_truncated: boolean, };
+export type OperationDto = { id: string, state: string, target_id: string, kind: string, created_at_us: number, error_code: string | null, };
+export type LogDto = { attempt_id: string, text: string, response_truncated: boolean, log_truncated: boolean, next_offset: number, untrusted: boolean, };
+export type EventDto = { seq: number, event_kind: string, workload_id: string | null, execution_id: string | null, payload_json: string, created_at_us: number, };
+export type DiagnosticDto = { execution_id: string, state: string, observed_causes: Array<string>, hypotheses: Array<string>, evidence: Array<EventDto>, safe_to_retry_automatically: boolean, };
+export type PlanDto = { current_revision: string | null, proposed_hash: string, changed: boolean, source_kind: string, warnings: Array<string>, };
+export type TokenDto = { id: string, actor_id: string, role: Role, namespaces: Array<string>, capabilities: Array<string>, expires_at_us: number | null, revoked: boolean, };
+export type CreatedTokenDto = { token: string, metadata: TokenDto, };
+export type Page<T> = { items: Array<T>, next_cursor: string | null, };

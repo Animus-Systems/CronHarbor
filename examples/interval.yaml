@@ -1,0 +1,25 @@
+apiVersion: cronharbor.dev/v1
+kind: ScheduledJob
+metadata:
+  name: anchored-interval
+  namespace: local
+spec:
+  owner: file
+  enabled: false
+  schedule:
+    type: interval
+    intervalSeconds: 300
+    anchorAtUs: 0
+    misfire:
+      policy: latest
+      latenessGraceSeconds: 60
+      maxAgeSeconds: 3600
+      maxOccurrences: 1
+  execution:
+    adapter: process
+    command: /bin/echo
+    args: ["anchored interval"]
+    workingDirectory: /tmp
+  timeoutSeconds: 30
+  logs:
+    maxRunBytes: 1048576

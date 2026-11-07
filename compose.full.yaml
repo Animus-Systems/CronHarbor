@@ -1,0 +1,20 @@
+services:
+  cronharbor:
+    build:
+      context: .
+      target: full
+    image: cronharbor:full-dev
+    init: true
+    stop_grace_period: 360s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["server", "--listen", "0.0.0.0:8090", "--ui-dir", "/usr/share/cronharbor/ui", "--file", "/etc/cronharbor/hello.yaml"]
+    ports: ["127.0.0.1:8090:8090"]
+    volumes:
+      - cronharbor-full-data:/var/lib/cronharbor
+      - ./examples:/etc/cronharbor:ro
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=32m,mode=1777
+volumes:
+  cronharbor-full-data:

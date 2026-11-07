@@ -1,0 +1,26 @@
+-- Operational state evolves without changing the initial migration checksum.
+ALTER TABLE workloads ADD COLUMN paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN(0,1));
+ALTER TABLE operations ADD COLUMN error_code TEXT;
+ALTER TABLE operations ADD COLUMN result_json TEXT;
+ALTER TABLE operations ADD COLUMN execution_id TEXT REFERENCES executions(id);
+ALTER TABLE attempts ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN(0,1));
+ALTER TABLE service_instances ADD COLUMN budget_started_at_us INTEGER;
+ALTER TABLE service_instances ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE service_instances ADD COLUMN consecutive_successes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE service_instances ADD COLUMN ready_at_us INTEGER;
+ALTER TABLE service_instances ADD COLUMN restart_requested INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE service_instances ADD COLUMN restart_reason TEXT;
+ALTER TABLE api_tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'observe';
+ALTER TABLE api_tokens ADD COLUMN namespaces_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE api_tokens ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]';
+CREATE UNIQUE INDEX token_hash_unique ON api_tokens(hash);
+CREATE TABLE runtime_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+INSERT INTO runtime_settings(key,value) VALUES('global_paused','false'),('restore_required','false');
+CREATE TABLE manual_queue(operation_id TEXT PRIMARY KEY REFERENCES operations(id),workload_id TEXT NOT NULL REFERENCES workloads(id),revision_id TEXT NOT NULL REFERENCES workload_revisions(id),actor_id TEXT NOT NULL,created_at_us INTEGER NOT NULL,expires_at_us INTEGER NOT NULL);
+CREATE TABLE retry_queue(execution_id TEXT PRIMARY KEY REFERENCES executions(id),attempt_index INTEGER NOT NULL,due_at_us INTEGER NOT NULL);
+CREATE TABLE restore_quarantine(id TEXT PRIMARY KEY,backup_at_us INTEGER NOT NULL,cutoff_us INTEGER NOT NULL,evidence TEXT NOT NULL,unresolved_attempts INTEGER NOT NULL,created_at_us INTEGER NOT NULL);
+CREATE INDEX manual_queue_due ON manual_queue(created_at_us);
+CREATE INDEX retry_queue_due ON retry_queue(due_at_us);
+CREATE TABLE service_probe_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,workload_id TEXT NOT NULL REFERENCES workloads(id),execution_id TEXT NOT NULL REFERENCES executions(id),kind TEXT NOT NULL CHECK(kind IN('readiness','liveness')),healthy INTEGER NOT NULL CHECK(healthy IN(0,1)),observed_at_us INTEGER NOT NULL);
+CREATE INDEX service_probe_workload ON service_probe_events(workload_id,seq);
+CREATE TABLE external_cleanup(attempt_id TEXT PRIMARY KEY REFERENCES attempts(id),handle_json TEXT NOT NULL,due_at_us INTEGER NOT NULL,failures INTEGER NOT NULL DEFAULT 0);

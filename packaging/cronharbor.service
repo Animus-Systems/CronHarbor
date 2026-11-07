@@ -1,0 +1,29 @@
+[Unit]
+Description=CronHarbor scheduler and service control plane
+After=network.target
+
+[Service]
+Type=simple
+User=cronharbor
+Group=cronharbor
+StateDirectory=cronharbor
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/cronharbor
+ExecStart=/usr/local/bin/cronharbor --state-dir /var/lib/cronharbor server --config /etc/cronharbor/daemon.yaml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=360
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/cronharbor
+UMask=0077
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

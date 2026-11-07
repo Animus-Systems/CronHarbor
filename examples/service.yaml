@@ -1,0 +1,24 @@
+apiVersion: cronharbor.dev/v1
+kind: Service
+metadata:
+  name: example-worker
+  namespace: local
+spec:
+  owner: file
+  enabled: true
+  execution:
+    adapter: process
+    command: /bin/sleep
+    args: ["3600"]
+    workingDirectory: /tmp
+  timeoutSeconds: 30
+  logs:
+    maxRunBytes: 1048576
+  service:
+    desiredState: STOPPED
+    restart: on-failure
+    maxRestarts: 5
+    windowSeconds: 300
+    backoffSeconds: 1
+    maxBackoffSeconds: 60
+    stopGraceSeconds: 1

@@ -1,0 +1,14 @@
+{
+  "dockerEnabled": false,
+  "dockerBinary": "/usr/bin/docker",
+  "dockerHost": "unix:///var/run/docker.sock",
+  "images": ["alpine@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034"],
+  "networks": ["none"],
+  "maxMemoryBytes": 268435456,
+  "maxPids": 64,
+  "systemdEnabled": false,
+  "systemctlBinary": "/usr/bin/systemctl",
+  "journalctlBinary": "/usr/bin/journalctl",
+  "systemdUser": false,
+  "units": ["example-worker.service"]
+}

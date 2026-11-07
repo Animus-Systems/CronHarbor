@@ -1,0 +1,8 @@
+.git
+target
+.cronharbor
+.DS_Store
+**/node_modules
+**/test-results
+**/playwright-report
+web/dashboard/dist

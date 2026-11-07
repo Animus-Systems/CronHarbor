@@ -1,0 +1,18 @@
+apiVersion: cronharbor.dev/v1
+kind: Service
+metadata:
+  name: existing-hardened-unit
+  namespace: local
+spec:
+  owner: file
+  enabled: true
+  execution:
+    adapter: systemd
+    systemd:
+      unit: example-worker.service
+  timeoutSeconds: 30
+  logs:
+    maxRunBytes: 1048576
+  service:
+    desiredState: STOPPED
+    restart: never

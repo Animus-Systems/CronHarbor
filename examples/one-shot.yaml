@@ -1,0 +1,16 @@
+apiVersion: cronharbor.dev/v1
+kind: OneShotJob
+metadata:
+  name: manual-example
+  namespace: local
+spec:
+  owner: file
+  enabled: true
+  execution:
+    adapter: process
+    command: /bin/echo
+    args: ["A manually requested execution"]
+    workingDirectory: /tmp
+  timeoutSeconds: 30
+  logs:
+    maxRunBytes: 1048576

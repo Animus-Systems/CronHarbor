@@ -1,0 +1,220 @@
+# Running CronHarbor
+
+The application is a single-node Rust scheduler, service supervisor and local command service with optional REST/SSE, read-only MCP and a static Vue dashboard. Software features and measured release acceptance are separate: see the verification record in `IMPLEMENTATION.md`.
+
+## Build and start the complete application
+
+Source builds require a Unix host, the pinned Rust toolchain in `rust-toolchain.toml`, Node.js 22 and npm. Run these commands from the repository root; the example daemon configuration uses paths relative to the process working directory, not to the YAML file.
+
+```sh
+npm ci --prefix web/dashboard
+npm run build --prefix web/dashboard
+~/.cargo/bin/cargo build --locked --features full
+./target/debug/cronharbor server --config examples/optional/daemon.yaml
+```
+
+Open `http://127.0.0.1:8090`. In another terminal, bootstrap an administrative credential through the owner-only local socket:
+
+```sh
+./target/debug/cronharbor tokens create --role admin --namespace '*' --capability '*' --output-file /tmp/cronharbor-admin.token
+```
+
+Read that private file locally and enter its value in the dashboard's password field. The browser holds it in memory; refreshing or disconnecting clears it. Keep the file private, remove it when no longer needed, and use a narrower token for routine work. The server stores only a hash, role, grants, namespaces, expiry and revocation state. `tokens list` and `tokens revoke TOKEN_ID` are audited controls.
+
+Use the [role/capability reference and scoped operator example](api/README.md#roles-and-capability-grants) to issue routine credentials instead of distributing the bootstrap Admin token.
+
+`--state-dir PATH` selects the installation and must be supplied to clients too. Existing directories must be owned by the daemon user with mode 0700. The local socket is `PATH/control.sock`, mode 0600. Linux additionally verifies the peer UID; other Unix platforms rely on the owner-only directory and socket permissions. Exactly one daemon owns that directory/database.
+
+The Core build uses no TCP listener or frontend runtime:
+
+```sh
+~/.cargo/bin/cargo build --locked
+./target/debug/cronharbor server --file examples/hello.yaml
+```
+
+The `api` feature includes REST/SSE without MCP; `full` includes API and MCP. Vue builds to static assets and has no production Node.js server. Native full builds serve an explicit `--ui-dir`, or the built repository dashboard when present. API and MCP always call the daemon over its local socket.
+
+### Installed systemd service
+
+`packaging/cronharbor.service` expects an existing `cronharbor` user/group, the binary at `/usr/local/bin/cronharbor`, and configuration at `/etc/cronharbor/daemon.yaml`. Its working directory is `/var/lib/cronharbor`; copying the checkout example unchanged will fail to find its manifests. Install reviewed definitions and use absolute paths, for example:
+
+```yaml
+workloads:
+  - /etc/cronharbor/workloads/hello.yaml
+paused: true
+listen: 127.0.0.1:8090
+uiDirectory: /usr/share/cronharbor/ui
+allowedOrigins: []
+```
+
+Build/install an API or Full binary for `listen` and `uiDirectory`; for Core, omit those fields and `allowedOrigins`. Install the built dashboard at the selected UI path. Keep configuration and manifests controlled by the operator and readable by the service user; keep secrets and executor policy private to that user. State must be owned by `cronharbor` with mode 0700. The supplied unit creates its state directory but does not install the user, binary, definitions or UI assets. Start paused, inspect plans and status, then explicitly resume after review. Use the same service UID and `--state-dir` for trusted local administration.
+
+## Docker profiles
+
+```sh
+docker compose up --build -d
+docker compose exec cronharbor cronharbor --state-dir /var/lib/cronharbor status
+docker compose down
+```
+
+The default Compose profile is Core: UID 10001, a read-only root filesystem, private persistent state, no published ports and no Docker socket. For the complete dashboard:
+
+```sh
+docker compose -f compose.full.yaml up --build -d
+docker compose -f compose.full.yaml exec cronharbor cronharbor --state-dir /var/lib/cronharbor tokens create --role admin --namespace '*' --capability '*'
+```
+
+The full profile binds host loopback port 8090. For remote use, put a TLS reverse proxy in front, preserve the intended Host or configure exact allowed browser origins, and block direct backend access. The HTTP adapter does not terminate TLS or trust forwarded client identity headers. Do not put secrets or symlinks to secrets in the static UI directory.
+
+Dockerfile targets `core`, `api`, `full` and `checks` build the respective binaries/application or run the complete Rust test and Clippy suite. The full image includes static Vue assets and a Docker CLI for explicitly enabled external execution; it still has no default Docker daemon access.
+
+## Definitions, plans and ownership
+
+```sh
+./target/debug/cronharbor config validate -f examples
+./target/debug/cronharbor config plan -f examples
+./target/debug/cronharbor config apply -f examples
+./target/debug/cronharbor jobs list --namespace local
+./target/debug/cronharbor jobs preview WORKLOAD_ID --count 10
+./target/debug/cronharbor jobs run WORKLOAD_ID --idempotency-key operator-intent-001
+```
+
+Directory apply validates the entire batch first and commits all revisions atomically. The CLI reads current revision plans and uses compare-and-swap; supply `--expected-revision` when applying one specific reviewed revision. Requests are bounded, so an exceptionally large batch should be split into separately reviewed batches rather than bypassing the limit.
+
+File-owned definitions remain read-only through the dashboard/API; use local file apply to change them. API-created definitions must say `owner: api`. The transport cannot silently convert an existing FILE workload into an editable API workload. Lifecycle pause/run/service operations are separate authorized actions.
+
+Scheduled jobs support five numeric cron fields, IANA time zones, explicit DST fold/gap selection, anchored intervals, bounded skip/latest/catch-up, allow/forbid concurrency and explicit safe-retry policy. One-shot jobs run only on manual request. No implicit shell is added; commands and argv are separate. Retries default to one attempt. UNKNOWN effects never automatically retry, even under an idempotent retry policy.
+
+Cancelling during retry backoff removes the pending retry and cancels the execution. The failed attempt remains in history with its original error; the original run operation reports cancellation.
+
+## Services and evidence
+
+```sh
+./target/debug/cronharbor services list
+./target/debug/cronharbor services start WORKLOAD_ID
+./target/debug/cronharbor services restart WORKLOAD_ID
+./target/debug/cronharbor services stop WORKLOAD_ID
+./target/debug/cronharbor executions
+./target/debug/cronharbor executions inspect EXECUTION_ID
+./target/debug/cronharbor executions diagnostics EXECUTION_ID
+./target/debug/cronharbor logs ATTEMPT_ID --follow --max-bytes 65536
+./target/debug/cronharbor operations inspect OPERATION_ID
+```
+
+Services distinguish desired RUNNING/STOPPED from observed startup/readiness/liveness/failure states. Explicit executable probes have deadlines and thresholds, with recent observations queryable. Automatic restart has a bounded window and backoff; operator restart is a separate authorized intent. Accepted operations are not completion evidence. Conflicting controls supersede earlier operations explicitly.
+
+A clean daemon shutdown records native cancellation as `DAEMON_SHUTDOWN`. Services still desired RUNNING become eligible on the next owner without spending their automatic restart budget, including `restart: never`. Explicit STOP remains stopped. Recovery also releases provably unlaunched service intents; uncertain starts remain UNKNOWN. Exhausted START/RESTART operations finish with the observed error instead of remaining accepted indefinitely.
+
+START received while an earlier STOP is terminating a process waits for that termination and requests a replacement, including with automatic restart disabled. Applying a new revision to a failed service permits a fresh launch; it preserves existing STOPPED intent and UNKNOWN evidence.
+
+`service.stopGraceSeconds` accepts 0–300 seconds. Docker receives the full grace period; the systemd helper waits for that period plus bounded overhead while the existing unit's own stop policy remains authoritative. The supplied systemd and Compose packaging allows 360 seconds for shutdown to finish an in-flight stop and bounded executor observation. Custom supervisors need the same allowance. Healthy external workloads remain available for reattachment after daemon restart.
+
+Operation lookup permits the originating actor to inspect its own operations. Inspecting another actor's operation requires `operations.manage` and the target namespace. Batch operations have no single target namespace and require wildcard namespace scope for another actor to inspect them.
+
+On daemon death, native attempts without reliable identity/outcome evidence become UNKNOWN and retain capacity. Do not guess that a missing PID proves no effect occurred. Investigate the downstream effect, then explicitly reconcile with evidence:
+
+```sh
+./target/debug/cronharbor executions reconcile EXECUTION_ID --state CANCELLED --evidence 'Verified downstream record and terminated worker at the recorded time'
+```
+
+Use a state supported by the evidence. Reconciliation is audited, and it does not automatically repeat the operation.
+
+Reconciliation retires pending executor observations before sending its success response, and checks retirement again after ownership inspection before follow-up controls or capture. It cannot undo a command already issued.
+
+Unresolved UNKNOWN logs remain protected from retention and still consume the configured disk and segment budgets. This can truncate later captures until an operator reconciles the uncertainty or increases capacity. Reconciled evidence becomes eligible for normal retention.
+
+## External executors and trust
+
+Copy the policy shape from `examples/optional/executors.json` to `STATE_DIR/executors.json`, owned by the daemon user with mode 0600. Enable only the adapter and exact targets required.
+
+Docker execution requires an explicit local Unix daemon connection and digest-pinned image allowlist. Admission fixes non-root container UID, network allowlist, read-only filesystem, dropped capabilities, no-new-privileges, memory/PID/CPU limits and bounded Docker logs. Workload manifests cannot request host mounts, privileged mode or host networking. Immutable labels bind instance/workload/revision/execution/launch identity; reconnect never adopts an object with mismatched labels. Owned terminal containers are removed only after durable outcome and successful log capture. A Docker daemon outage yields uncertainty, not success or blind replay. Access to a privileged Docker daemon remains high authority, even when CronHarbor itself is non-root.
+
+The systemd bridge controls only exact allowlisted existing `.service` units. Existing units retain their execution environment, credentials, AppArmor, filesystem and cgroup protections. Unit manifests reject native command/env/limit settings instead of silently ignoring them. Journal capture uses the persisted start-intent time as its lower boundary; legacy handles without that evidence return unavailable logs. This bridge needs existing OS authorization; CronHarbor does not install broad polkit/D-Bus permissions or recreate units as raw processes. The time filter follows the official [journalctl](https://www.freedesktop.org/software/systemd/man/256/journalctl.html) and [systemd timestamp](https://github.com/systemd/systemd/blob/main/man/systemd.time.xml) contracts; a live hardened-unit drill is still required for each deployment.
+
+Terminal unit outcomes use systemd's `Result` with validated `ExecMainCode` and `ExecMainStatus`. A timeout remains a failure even with status zero; configured successful nonzero exits or clean signals remain successful. Incomplete evidence stays UNKNOWN. See the official [service result properties](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [successful exit configuration](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
+
+Native workloads run with the daemon UID and namespace. They are trusted code, not adversarial tenants. Configured Linux resource limits use the platform's `prlimit`; root NPROC enforcement is rejected because it would give a false guarantee. Process groups and bounded probes provide cleanup, while unresolved escaped descendants remain uncertain. For critical isolation, use reviewed systemd units or the constrained Docker adapter.
+
+## Secrets and log budgets
+
+Use `execution.secretRefs` with `provider: env` plus `name`, or `provider: file` plus an absolute private file `path`. The database stores references, not resolved values. Resolved values are injected only into approved execution and redacted from captured output, including across chunk boundaries. Known sensitive environment names cannot carry plaintext values in definitions. Do not assume arbitrary unknown secrets printed by a program can always be recognized.
+
+Logs have per-run byte caps, bounded query windows, total disk/segment/age retention and explicit truncation indicators. API/CLI clients follow the server's raw `next_offset` byte cursor, including for malformed UTF-8. Recovered Docker logs use the owned container's original launch secret values; if those cannot all be verified, capture is withheld and the container is retained. The tightest configured current `maxDiskBytes` is the installation's effective log budget. Lowering it requires draining/reconciling active or UNKNOWN attempts. Protected unresolved execution evidence is retained; a full storage/audit path blocks new effects.
+
+`maxDiskBytes`, `maxSegments` and `retentionSeconds` control retention across the installation. Existing-definition changes require an Admin credential with `operations.manage` and wildcard namespace scope, or the trusted local owner. Scoped creators may add a workload only if its limits do not tighten the current installation limits. `maxRunBytes` remains a per-workload safe edit. These checks apply to single and batch configuration changes; they preserve the active/UNKNOWN disk-budget guard.
+
+HTTP allows 240 unrecognized credential checks per minute per API process before daemon work, separately from authenticated request limits. A new or evicted credential can receive 429 during rejection traffic; retry after the minute window and configure network-level admission at a remote proxy. Verified hashes stay in the bounded table across request-window resets, with expired entries evicted only to admit another verified credential. This does not cache authorization: every operation still checks revocation. Authentication rejection evidence is sampled at most once per second per daemon owner and retains only its latest 1,000 records across restarts. Other audit history is preserved; rejection samples are not a complete attempt count.
+
+## Backup, restore and upgrades
+
+```sh
+./target/debug/cronharbor pause --evidence 'Planned upgrade; new dispatch paused'
+./target/debug/cronharbor backup before-upgrade
+```
+
+Backups use SQLite's backup API, integrity/foreign-key checks, a SHA-256 manifest and private durable files. Preserve the previous binary/image digest. Schema migrations are monotonic and checksummed; an unsupported version/checksum fails closed. Never copy only a live WAL main file.
+
+Schema version 3 adds an index for bounded rejection-history cleanup and removes `auth.reject` records older than the latest 1,000, leaving all other audit actions intact. Upgrade preserves a private pre-migration database backup. Version 1/2 snapshots remain supported and upgrade under restore quarantine. Older binaries cannot open version 3; rollback requires the matching older binary and a verified pre-upgrade snapshot, followed by the normal restore reconciliation procedure.
+
+Transfer the snapshot and its `.db.manifest.json` sidecar together. Both must be regular files owned by the restoring user with no group/other permissions or additional hard links. Symlink or FIFO sidecars are rejected before installation; preserve mode 0600 when archiving or moving backups.
+
+The snapshot contains SQLite state, including workload revisions and log metadata. It does **not** contain these resources; back them up and restore or provision them separately as required:
+
+- `STATE_DIR/executors.json` (private mode 0600); without it, external adapters default to disabled.
+- `STATE_DIR/logs/`; database log metadata alone cannot recover captured bytes.
+- Referenced secret files and the daemon's secret environment, executables, pinned images and existing systemd units.
+- Daemon configuration and static UI assets. Review endpoint/origin settings for the recovery installation.
+
+Stop the previous owner before restoring. A new target directory is safest; replacing existing state requires explicit `--replace` and preserves prior database/WAL files in a private quarantine directory:
+
+```sh
+./target/debug/cronharbor --state-dir /var/lib/cronharbor-restored restore /path/to/snapshot.db --evidence 'Restore incident and snapshot identity verified'
+./target/debug/cronharbor --state-dir /var/lib/cronharbor-restored server
+```
+
+That startup is a paused, CLI-only recovery session with no HTTP listener. To inspect through the dashboard using an API/Full build, instead start `server --listen 127.0.0.1:8090 --ui-dir /absolute/path/to/dashboard/dist`. Keep recovery startup free of `--file` and workload-bearing `--config`: those apply definitions at startup and can replace snapshot revisions. Re-provision reviewed executor policy and required runtime/secret resources before startup, then inspect them before resume. Preserve private ownership when restoring logs. Do not copy live state indiscriminately or restore old token files as usable credentials.
+
+Restore fully stages, syncs and verifies the replacement's hash, integrity and supported migration checksums before touching existing state. It writes external installation/quarantine markers before swapping files. An interrupted installation blocks startup; preserve all files and retry the verified snapshot into a new private target directory. Startup after a completed restore stays paused, quarantines the backup-to-cutoff interval and invalidates restored API credentials before remote reads; bootstrap fresh credentials locally. Reconcile surviving external work and lost downstream effects. A snapshot cannot tell you what ran after it was taken. Resume requires explicit evidence and cutoff:
+
+```sh
+./target/debug/cronharbor --state-dir /var/lib/cronharbor-restored resume --cutoff-us VERIFIED_UTC_MICROSECONDS --evidence 'Exclusive owner and backup-to-cutoff effects reconciled'
+```
+
+The daemon advances cursors beyond that interval rather than catching it up. Unknown attempts still hold capacity until separately resolved. Restoring an old snapshot is not an ordinary restart or permission to replay work.
+
+Automatic external reattachment is suspended throughout restore quarantine, so snapshot timeouts, cancellation flags and desired state cannot issue executor commands before resume. Inspect surviving work independently before reconciling it. Resume discards queued retries and finalizes their execution/operation as quarantined, preserving the failed attempt's evidence.
+
+## Read-only MCP
+
+```sh
+./target/debug/cronharbor tokens create --role observe --namespace local --capability workload.read --capability execution.read --capability logs.read --output-file /private/path/observe.token
+./target/debug/cronharbor mcp --token-file /private/path/observe.token
+```
+
+Configure that command as a stdio MCP server. The SDK supports the tested protocol versions; the bridge exposes ten fixed observation tools, with no arbitrary command, SQL, HTTP fetch or mutable tool. The Observe identity is enforced by the daemon. Logs are returned as bounded untrusted data, never instructions.
+
+## Migration
+
+```sh
+./target/debug/cronharbor import cronicle exported-events.json --dry-run --namespace pilot --report json
+```
+
+Import is passive: reports classify schedules and produce disabled proposals only where literal command semantics can be preserved. Complex shell scripts, year constraints, unknown plugins and hardened unit conversions require review or are blocked. Reports do not echo rejected scripts or activate either scheduler. Compare the next 100 source UTC instants, current credentials/cwd/sandbox and live ownership before a one-at-a-time cutover. Actual Banana Ventura production inventory and operator approval are external requirements; source templates alone cannot establish them.
+
+## Verification
+
+```sh
+npm ci --prefix web/dashboard
+(cd web/dashboard && npx playwright install chromium)
+python3 scripts/check_repository.py
+~/.cargo/bin/cargo fmt --all --check
+~/.cargo/bin/cargo test --locked --all-features --all-targets
+~/.cargo/bin/cargo clippy --locked --all-features --all-targets -- -D warnings
+npm run typecheck --prefix web/dashboard
+npm test --prefix web/dashboard
+npm run build --prefix web/dashboard
+~/.cargo/bin/cargo build --locked --features full
+python3 scripts/test_full.py --browser
+```
+
+On Linux, Playwright's `npx playwright install --with-deps chromium` also installs required system libraries. Build the full debug binary immediately before `test_full.py`, or point `CRONHARBOR_BINARY` to a preserved full-feature artifact. Cargo builds with different feature sets share the default binary path. Docker adapter acceptance additionally uses `scripts/test_docker_executor.py` with an explicitly supplied test daemon and digest-pinned image. CI includes the Rust, browser, generated-contract and image checks; execution evidence is recorded separately from workflow configuration.

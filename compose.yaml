@@ -1,0 +1,19 @@
+services:
+  cronharbor:
+    build:
+      context: .
+      target: core
+    image: cronharbor:dev
+    init: true
+    stop_grace_period: 360s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["server", "--file", "/etc/cronharbor/hello.yaml"]
+    volumes:
+      - cronharbor-data:/var/lib/cronharbor
+      - ./examples:/etc/cronharbor:ro
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=32m,mode=1777
+volumes:
+  cronharbor-data:

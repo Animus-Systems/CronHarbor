@@ -1,0 +1,11 @@
+# Checkout example: run from the repository root; paths resolve from process cwd.
+# Installed services should use absolute manifest and UI paths (see docs/RUNBOOK.md).
+workloads:
+  - examples/hello.yaml
+  - examples/one-shot.yaml
+  - examples/service.yaml
+  - examples/interval.yaml
+paused: false
+listen: 127.0.0.1:8090
+uiDirectory: web/dashboard/dist
+allowedOrigins: []

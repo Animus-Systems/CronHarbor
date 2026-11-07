@@ -1,0 +1,163 @@
+# Implementation verification record
+
+Recorded on 2026-11-07. These results describe the local source and disposable fixtures. They do not certify a production installation or replace the remaining release gates.
+
+## Executed checks
+
+| Check | Actual evidence |
+|---|---|
+| Rust, macOS arm64 | 168 tests passed with all features/all targets after the security fixes; format, Clippy with warnings denied, Full build and generated-artifact comparisons passed |
+| Rust, Linux aarch64 | Fresh pre-commit Docker `checks` build passed all 168 tests in 26 suites and Clippy with warnings denied, including the security fixes |
+| Original design artifacts (historical) | 13 Python assertions passed against the original embedded SQL and design contracts. The maintained repository check now reads real migrations and current documentation directly; no design folder is required |
+| Dashboard | Typecheck, 56 unit tests, production build, 24 distinct Chromium browser scenarios and npm audit passed; audit reported zero known vulnerabilities. The browser checks include real production CSP/CORS across two HTTP origins. Initial desktop/mobile overview, service evidence and settings screenshots were visually inspected |
+| Real command service/transports | `scripts/test_full.py --browser` passed against a full binary: REST authorization/CAS/idempotency, actual jobs and service start/restart/stop, official SDK stdio MCP and restore quarantine/resume. Both REST and CLI operation lookup allow the target namespace and deny an unrelated namespace |
+| Restore copy failure | A 65,536-byte file-size limit interrupted a real replacement copy; existing database hash and workload count remained intact, with no restore marker installed |
+| Restore replay | A real process produced an external effect after a snapshot; restoring the snapshot under skip/latest/catch-up stayed paused and advanced beyond the explicit cutoff without repeating the effect |
+| Docker workload adapter | `scripts/test_docker_executor.py` passed against an explicit local test daemon: pinned image, real owned container/output, terminal cleanup, daemon outage → UNKNOWN without retry |
+| systemd bridge | Allowlist, literal start/show/stop and persisted start-time journal filter verified using bounded mock executables; native command/env/limit settings are rejected for unit-only definitions |
+| Log boundaries | Malformed UTF-8/emoji raw cursors, secret rotation recovery, 7,000-byte secret under a 4,096-byte log cap, helper-capture truncation and 301-line capture regressions passed |
+| Generated contract/schema | Rust DTO/schema export ran successfully. Draft 2020-12 schema and six workload examples independently validated; runtime validation accepted all six |
+
+The complete `test_full.py --browser` run also passed using the rebuilt full binary. Hosted CI results are separate from these local checks and appear on each commit's GitHub checks.
+
+## Documentation fixes and pre-commit verification
+
+The 2026-11-07 documentation review's eight findings are corrected: backup exclusions and recovery prerequisites, process-relative configuration paths and installed service examples, plan/revision-CAS apply, role/capability grants, Chromium installation, audit retention, POST media types/framework error exceptions, and Linux-only peer UID verification. No runtime source, dependency, contract or migration changed in this documentation pass.
+
+Disposable real-daemon checks executed the documented `curl`/`jq` plan/apply blocks for both creation and update, an absolute-path daemon configuration from an unrelated working directory, and the scoped service-operator credential/control example. They confirmed 415 for unsupported POST content type, 400 plaintext for malformed UTF-8 paths, SQLite-only backup exclusions, and paused recovery without an HTTP listener. Independent final review caught and corrected the extra `execution.read` permission needed for Observe tokens using HTTP logs.
+
+Fresh publication checks passed: 168 Rust tests on each of macOS arm64 and Linux aarch64, format, Clippy, Full build, eight repository checks, 56 dashboard unit tests, typecheck, production build, byte-identical generated DTO/schema comparisons, npm audit (zero known vulnerabilities), and all 24 distinct Chromium scenarios through real-daemon acceptance. Gitleaks scanned the intended source files with no secrets found; the final inventory includes source, lockfiles, migrations, examples, documentation and assets, excluding private state, build output and dependencies.
+
+Core/API/Full images were rebuilt from the current source and profile isolation passed. Core/Full container smoke and the real opt-in Docker adapter acceptance passed, including owned log capture/cleanup and daemon-outage UNKNOWN behavior. The dedicated test Colima profile is stopped after cleanup; no images were published. Live systemd, production migration/load, x86_64, power-loss/OOM and release signing/licensing gates remain unexecuted.
+
+## Additional failure-boundary tests
+
+The 2026-11-07 hardening pass added 35 Rust tests, 36 frontend unit cases and three browser scenarios beyond the original 93/20/12 suite. The added tests run through the normal Cargo, Vitest and Playwright commands in CI; no new test dependency or public DTO was introduced. Generated TypeScript/schema exports remained byte-for-byte unchanged.
+
+| Boundary | New evidence and fixes |
+|---|---|
+| SQLite transactions | Injected attempt/audit/event/operation-acknowledgement failures and writer contention. Failed acknowledgements previously left an open savepoint with visible uncommitted effects; every effect/completion error now rolls back before the connection handles another command |
+| Crash recovery | Real SIGKILL at launch-intent, start-requested, persisted-receipt/finished-effect, and terminal-result boundaries. The expected CANCELLED/UNKNOWN/SUCCEEDED evidence survives, with no same-occurrence replay |
+| Restore inputs | Active-owner rejection and FIFO/symlink/hard-link/nonprivate sidecar rejection before installation. A FIFO manifest previously blocked restore; the sidecar now opens nonblocking without following symlinks and is validated through its descriptor |
+| Scheduling | Interval alignment and forward/reverse ordering across anchors, integer overflow/invalid intervals, half-hour DST folds, and a skipped date-line calendar day |
+| Native capture and cleanup | Split/overlapping secret boundaries, I/O-error truncation, TERM refusal/escalation, private file checks and bounded cleanup. A capture read error previously flushed a buffered secret prefix; incomplete trailing bytes are now withheld |
+| External executor evidence | All five ownership labels, truncated/multiple-object inspect replies, hard-linked policy rejection and complete-name-list fallback. Failed inspection previously allowed a false absence/termination claim; only a complete successful listing that excludes the exact name proves absence |
+| HTTP/local framing | Ambiguous singleton headers, malformed/duplicate/deep JSON, exact body limits, query bounds, transient SSE closure and oversized daemon replies. Header ambiguity is rejected, bad daemon output maps to service failure, and response byte limits consistently account for the newline delimiter |
+| MCP | FIFO token rejection, invalid arguments without dispatch, session continuity, per-query revocation, safe errors and the full serialized result cap |
+| Browser sessions and intent | Delayed connect/pagination results across logout, exact immutable mutation retry bodies, one manual retry at a time, stale editor plans, and token callbacks crossing sessions |
+| Browser event recovery | Chunked/malformed SSE, cancellation of rejected bodies, and durable cursor validation. Event IDs must equal a safe integer payload sequence and advance it; malformed or backward frames cannot poison the reconnect cursor |
+
+Fault injection exercises specific SQLite failure points and real process death. It does not simulate every fsync failure, arbitrary filesystem corruption, cgroup OOM, physical power loss, or all scheduler/executor interleavings. Test counts are evidence of executed cases, not a proof of defect absence.
+
+## Review fixes
+
+All twelve reported findings were corrected on 2026-11-07. The fresh checks above include 17 additional Rust tests and five additional browser scenarios. Public DTO/schema exports remained byte-for-byte unchanged; no migration or dependency was added.
+
+| Finding | Fix and regression evidence |
+|---|---|
+| 1: Retry cancellation | Cancelling during backoff atomically removes the retry and finalizes the execution/original operation without rewriting the failed attempt. Reopen/idempotency and injected finalization-failure rollback are covered |
+| 2: UNKNOWN retention | Unresolved logs survive segment, disk and age pressure while still consuming budgets; normal retention resumes after evidence-based reconciliation. Recovered external captures are indexed even when the outcome remains UNKNOWN |
+| 3: systemd terminal result | Validated Result/ExecMainCode/ExecMainStatus determine the outcome. Timeout with status zero fails; configured nonzero and clean-signal success remains successful; incomplete evidence remains UNKNOWN |
+| 4: Log ownership | Capture requires fresh verified ownership. Inspection loss withholds logs, marks capture incomplete and retains the container for investigation |
+| 5: Redaction bounds | One pass over original bytes selects the longest secret match without rescanning markers. Expansion and exact-cap/truncation cases stay bounded |
+| 6: Stop grace | Docker receives validated 0/120/300-second values. Shutdown drains pending stops, including cancellation arriving during observation; supplied Compose/systemd supervisor grace is 360 seconds |
+| 7: STOP then START | A real slow-TERM process is replaced and the START operation completes with never/on-failure automatic restart and zero restart budget |
+| 8: Failed-service revision | A new revision relaunches a failed service with exhausted restart budget, preserving UNKNOWN evidence and explicit STOPPED intent |
+| 9: Operation authorization | Other-actor lookup requires the target namespace plus operations.manage. Workload/execution/apply targets, own-actor access and wildcard/batch scope are covered; real REST and CLI checks also pass |
+| 10–12: Dashboard detail | Looking up operation B replaces routed operation A; refresh includes new execution history; successful recovery clears transient detail errors. Late route/session responses cannot populate the next view |
+
+A repeated Linux run exposed uncertainty in the new slow-stop fixture: it forced simultaneous shell/child termination, and the daemon correctly returned UNKNOWN instead of replacing an unverified process tree. The fixture now exits cleanly after recording TERM, within its grace period. Its eight-second assertion deadline is unchanged; five consecutive concurrent Linux service-suite runs passed. Separate tests still exercise kill escalation and uncertain cleanup.
+
+## Second review fixes
+
+The next ten reported findings were fixed one after another on 2026-11-07, with failing regressions before each behavior change. This pass adds 13 Rust tests and four browser scenarios. No migration, dependency or public DTO change was needed; regenerated contracts/schema compare byte-for-byte with the existing artifacts.
+
+| Finding | Fix and executed regression evidence |
+|---|---|
+| 1: Native owner restart | A real native service resumes after clean daemon shutdown under on-failure and never policies, with zero restart budget. Explicit STOP persists and DAEMON_SHUTDOWN is recorded separately |
+| 2: Reconciliation race | Reconciled attempts retire their watches before acknowledging success; stale running/finished observations cannot overwrite state or terminate the owner. Gated tests immediately release ordinary, stop-helper and log-helper inspection after that acknowledgement, without a scheduler-loop barrier, and verify no follow-up command |
+| 3: Restore controls | A real backup/replace restore with an expired external timeout issues no automatic executor calls during quarantine. Reattachment resumes only after explicit resume; uncertain capacity stays reserved |
+| 4: Interrupted service intent | Provably unlaunched service intents return to an eligible state after owner recovery. START_REQUESTED uncertainty remains UNKNOWN and cannot launch again |
+| 5: Rate capacity | 1,024 invented bearer values on unknown routes cannot reserve credential buckets. Invalid operational bearers remain unauthorized and a fresh real viewer still receives status; normal request/log limits remain covered |
+| 6: Retry selection | An older retry whose workload is full cannot starve another workload's admissible retry. Reconciliation releases the blocked retry without deleting its intent |
+| 7: Operation completion | Exhausted START/RESTART operations fail with the observed cause; interrupted manual launches and discarded restored retries finish their original operations transactionally. Failed attempt evidence remains intact |
+| 8: Retry cancellation UI | Browser cases exercise cancellation while the latest attempt is FAILED, including an initial diagnostics 503 recovered by polling or Refresh. The queued-retry warning and transient errors update without replaying mutations |
+| 9: Recent failures | Old executions with new failed/timed-out completions appear within the window and completion ordering is correct. Unresolved UNKNOWN is age-independent, namespace filtering holds, and ordinary history pagination is unchanged |
+| 10: Remote API hosting | CSP admits only the configured API origin; unsafe configuration fails closed. A real second HTTP host, daemon-backed API, CORS and browser authentication pass together |
+
+The main browser pass executes 23 same-origin scenarios and intentionally skips the separate-origin scenario. The acceptance script then executes that scenario against two real HTTP origins, for 24 distinct executed cases. Its output directory and list-only reporter preserve the main pass's screenshots and HTML report.
+
+Independent final review reproduced and challenged the fixes. It exposed the nested-inspection retirement and diagnostics-recovery cases above; both were reproduced failing and verified passing before final checks. Rebuilt macOS and Linux suites passed all 158 tests, and real REST/MCP/Docker/restore plus Core/Full smoke checks passed. Live host systemd, arbitrary process-tree containment, power-loss/OOM and production load remain separate acceptance gates.
+
+One macOS rerun encountered OWNER_UNAVAILABLE during the existing lost-receipt test's immediate owner handover; five repeated process-suite runs then passed. That fixture now waits at most two seconds, retrying only OWNER_UNAVAILABLE and failing other errors immediately. Production locking and exclusive-owner assertions are unchanged. The [Rust file-lock contract](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock) accounts for inherited handles; parallel spawn inheritance is consistent with the transient, not a proven trace of that individual failure.
+
+## Security review fixes
+
+Both confirmed medium-severity findings were corrected locally on 2026-11-07, without the account-gated security service. Ten regression tests were added: seven shared authorization/audit/migration cases, two API cases, and one older-snapshot restore case. The complete macOS suite now passes 168 tests in 26 suites, with zero failures or ignored tests.
+
+| Finding | Fix and executed evidence |
+|---|---|
+| Cross-namespace retention | Single/batch preflight requires Admin + `operations.manage` + wildcard namespaces for changes to the three global retention fields. Scoped creation cannot tighten current effective limits, including default creation when the installation permits a larger disk budget. Tests deny scoped Admin, wildcard Editor and insufficient grants; safe timeout/per-run changes, nonrestrictive creation, global administration and local FILE apply remain allowed. Existing active/UNKNOWN retention tests also pass |
+| Rejection-driven storage growth | A constant-space API verification budget limits unknown credentials before all daemon work, including log lookup and SSE. Daemon rejection writes use a monotonic one-second sampling interval and retain only the latest 1,000 rejection records, leaving other audit actions intact. Repeated/rotating/short invalid credentials, valid-token continuity, revocation, window recovery, hash-table capacity and fail-closed audit errors are covered |
+| Schema compatibility | New checksummed migration 3 adds the rejection-only index and bounds existing rejection history. Migrations 1/2 are unchanged. Version-2 upgrade keeps trusted audit history and a private pre-migration backup; an altered migration checksum is rejected. A version-2 snapshot restores, upgrades to version 3 and remains paused/quarantined. Existing backup, restore-failure and replay tests pass |
+
+The original vulnerability assertions failed before the fixes: scoped edits/creation were accepted, 300 invalid daemon authentications produced 300 records, and repeated invalid HTTP requests never throttled. The corrected regressions pass. Independent local candidate review also identified and reproduced an authenticated-window expiry regression; verified hashes now remain in the bounded table across counter resets, while every command still checks daemon authorization and revocation. The failing expiry test then passed, and the independent API review passed all five API unit tests.
+
+Fresh checks: all-feature/all-target Rust tests, format, Clippy with warnings denied, Full build, eight repository checks, TypeScript typecheck, 56 dashboard unit tests, production UI build and byte-identical generated DTO/schema comparisons. `scripts/test_full.py --browser` passed against a uniquely copied Full binary: actual REST/CLI permissions and operation scope, CAS/idempotency, service controls, bounded logs, read-only MCP, restore copy failure/quarantine/resume and all 24 distinct Chromium scenarios, including the separate-origin case.
+
+No dependency or public DTO changed. No production state, deployment or hosted security-model workflow was used. Linux/container builds, Docker acceptance, live systemd, sustained hostile load, physical power loss and version-1 snapshot fixtures were not rerun for this patch. New or evicted credentials can receive 429 while the shared verification budget is exhausted; this is documented admission behavior, not cached authorization. Rejection samples are deliberately not a complete count of authentication attempts. The earlier dependency-maintenance advisory was outside these two vulnerability fixes.
+
+## Packaged images
+
+The image IDs below are fresh local pre-commit builds including the security fixes. Linux aarch64 profile checks verified that Core has no TCP/MCP switches, API has TCP without MCP, and Full has both. These local images have not been published.
+
+- Core smoke passed: UID 10001, read-only root, no published ports/socket mount, second owner denied, real scheduled output, durable history and no duplicate occurrence after restart. Local image ID: `sha256:98b8cb58a9e1a7451da369d7d3f5adeae45a120d10b25dbc4f74fbdb5a9ca227`.
+- API release build and profile isolation passed. Local image ID: `sha256:1b4b51676dbe26559e587ae49ed9a8ed547a56ef392c9f8b66796d4e737fd651`.
+- Full smoke passed: packaged dashboard, loopback HTTP, unauthenticated API rejection, local token bootstrap, authenticated status and packaged Docker CLI without daemon socket. Local image ID: `sha256:21e7b93e95053b65403bc93713c4cb02e08e1229dff408d11a862a787182558b`.
+- `scripts/smoke_docker.py` and `scripts/smoke_full_docker.py` removed their disposable containers/volumes. No multi-architecture publication or x86_64 run is implied by these local results.
+
+## Requirement-to-evidence mapping
+
+The original scenario identifiers are in [the retained acceptance catalog](ACCEPTANCE.md). A row identifies evidence and limits; it does not silently promote a narrower fixture into the entire proposed acceptance matrix.
+
+| Requirement/scenario | Implemented behavior and executed evidence | Remaining limit |
+|---|---|---|
+| CH-REL-01 / T-001 | Exclusive owner lock; `core` owner regression and real Compose second-owner denial | Multi-host/shared-network storage is outside scope |
+| CH-REL-02 / T-002 | Actual SIGKILL after spawn before receipt; restart records UNKNOWN and does not redispatch (`crash`, `process`) | Failure injection after every durable write/external call has not been exhausted |
+| T-003 | Durable unique due occurrence and UNKNOWN capacity regression (`core`) | High-contention WAL stress remains a release drill |
+| CH-SCH-01 / T-004, T-005 | Europe/Madrid first/second/both fold and skip/next-valid gap fixtures (`runtime_schedule`) | Live Cronicle inventory parity requires frozen source fixtures |
+| CH-SCH-02 / T-006 | Bounded skip/latest/catch-up generation; lateness and backlog regressions (`core`, `runtime_schedule`) | Full large-inventory downtime benchmark not measured |
+| CH-SCH-03 / T-007 | Declared overlap/concurrency and global admission count active plus UNKNOWN attempts | Production workload capacity sizing not measured |
+| CH-API-01 / T-008, T-009 | Durable idempotency, conflicting digest and revision CAS regressions plus real REST runs | No distributed command owner |
+| T-010 | Real timeout, TERM/KILL, forked probe cleanup, bounded helper EOF, concurrent disk-log caps | No adversarial fork-bomb/cgroup calibration; native same-UID execution is trusted |
+| CH-DKR-02 / T-011 | Default-disabled adapter, explicit policy/ownership validation, real Docker outage and fake recovery/rotated-secret regressions | Full privileged-daemon incident matrix and real container-engine crash recovery not exhausted |
+| CH-SEC-02 / T-012 | Daemon-side namespace/capability checks, safe-editor probe-edit denial, job-only service Pause/Cancel denial, global controls reject namespace-scoped admin | No independent penetration test claimed |
+| CH-MCP-01 / T-013, T-014 | Fixed read-only tools, Observe-only identity, hostile-log data annotations, protocol 2025/2026 tests and real stdio exchange | No write-MCP tools by design |
+| CH-UX-01 / T-015 | Shared operation state, reconnect snapshots and no automatic mutation retry; browser interruption tests | Sustained 100-client SSE load not benchmarked |
+| CH-OPS-01 / T-016, T-021 | Hash/integrity/FK/schema checks, staging before replacement, incomplete-install guard, token invalidation, actual post-snapshot effect drill for all misfire policies | Power-loss/fsync fault simulation and real disk-loss recovery not exhausted |
+| CH-SEC-01, CH-DKR-01 / T-017 | Core nonroot/read-only/no ports/no Docker socket; owner-only health and real scheduled output | Only locally reported architecture tested |
+| CH-CONF-01 / T-018 | FILE/API source authority and atomic batch/CAS enforced in daemon, REST and dashboard | Existing foreign authority requires explicit operator migration |
+| T-019 | Passive importer blocks or flags hardened conversions; bridge keeps exact pre-existing unit | Real hardened host unit, AppArmor and polkit integration not exercised |
+| T-020 | Bundled SQLite 3.54.1; startup version floor/known patched-runtime exceptions | Future upstream advisories need normal dependency maintenance |
+| T-022 | Inclusive 60-second grace, canonical-size and dispatch recheck regressions | Wall-clock/host failure matrix not exhaustive |
+| CH-MIG-01 | Passive bounded import, disabled proposals, unsupported/security-gap classification, next-100 UTC projections | No access to live production inventory; exclusive cutover and source parity need operator evidence |
+
+## Reproduce
+
+Use the commands in [IMPLEMENTATION.md](../IMPLEMENTATION.md) and [RUNBOOK.md](RUNBOOK.md). The acceptance scripts create private disposable state and remove their test containers/volumes. Explicitly select a test Docker context; no production daemon is assumed. `test_full.py --browser` requires the dashboard dependencies, build and Playwright Chromium.
+
+Docker targets build Core/API/Full separately. The `checks` target runs all Rust features; the full target also builds and tests the Vue source. Generated DTO and schema exports must match committed artifacts before publication.
+
+After verification, all disposable containers/volumes and application test processes were gone. Ports 5173, 5176, 5177, 5178, 5179 and 8090 had no listeners. The dedicated Colima cronharbor profile was restored to Stopped; the global Docker context remained desktop-linux.
+
+## Documentation and planning-folder retirement
+
+The README, contributor instructions, and maintained checks were updated on 2026-11-07. `scripts/check_repository.py` replaces the former design-artifact script and applies the actual checked-in migrations, including runtime migration 2. All eight relationship/grace/document-link checks passed with the original planning folder temporarily absent. `cargo check --locked --all-features` also passed with that folder absent; active CI and documentation no longer reference it.
+
+The retained [acceptance catalog](ACCEPTANCE.md) preserves scenario IDs and release/performance gates. The root README includes an original SVG banner, a real test-workload dashboard screenshot, and two Mermaid diagrams. Both diagrams rendered successfully in local Chromium using Mermaid 12.3.0, and the banner was XML-validated and visually inspected. GitHub's hosted rendering was not exercised.
+
+The later twelve-finding fix pass reran the application runtime suites, browser checks, real transports/executors and container builds. The results at the top of this record describe that pass.
+
+## External acceptance gates
+
+Unexecuted gates include the real Banana Ventura migration/cutover, host systemd security drill, the complete disk-full/OOM/power-loss fault matrix, performance profiles P0–P5, x86_64 execution, independent security review, Rust advisory/license policy automation, SBOM, signing/provenance and name/legal clearance. No production migration, public release or published image is claimed by these local checks.
