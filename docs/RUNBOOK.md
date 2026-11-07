@@ -203,6 +203,8 @@ Import is passive: reports classify schedules and produce disabled proposals onl
 
 ## Verification
 
+Run verification locally before committing or pushing. The hosted workflow only checks repository migrations and document links, with a three-minute job timeout.
+
 ```sh
 npm ci --prefix web/dashboard
 (cd web/dashboard && npx playwright install chromium)
@@ -217,4 +219,4 @@ npm run build --prefix web/dashboard
 python3 scripts/test_full.py --browser
 ```
 
-On Linux, Playwright's `npx playwright install --with-deps chromium` also installs required system libraries. Build the full debug binary immediately before `test_full.py`, or point `CRONHARBOR_BINARY` to a preserved full-feature artifact. Cargo builds with different feature sets share the default binary path. Docker adapter acceptance additionally uses `scripts/test_docker_executor.py` with an explicitly supplied test daemon and digest-pinned image. CI includes the Rust, browser, generated-contract and image checks; execution evidence is recorded separately from workflow configuration.
+On Linux, Playwright's `npx playwright install --with-deps chromium` also installs required system libraries. Build the full debug binary immediately before `test_full.py`, or point `CRONHARBOR_BINARY` to a preserved full-feature artifact. Cargo builds with different feature sets share the default binary path. Docker adapter acceptance additionally uses `scripts/test_docker_executor.py` with an explicitly supplied test daemon and digest-pinned image. Run generated-contract comparisons, dependency audits and the appropriate container checks locally too; execution evidence is recorded separately from workflow configuration.

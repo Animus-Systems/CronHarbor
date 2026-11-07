@@ -141,6 +141,8 @@ Runnable workload definitions are in [examples/](examples/). The [runbook](docs/
 
 ## Development and checks
 
+Run verification locally before committing or pushing. GitHub Actions runs only the fast migration/document-link repository checks, with a three-minute job timeout. Full tests, builds, browser acceptance and container checks are local responsibilities.
+
 ```sh
 python3 scripts/check_repository.py
 cargo fmt --all --check

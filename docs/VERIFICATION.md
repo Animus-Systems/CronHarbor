@@ -18,7 +18,7 @@ Recorded on 2026-11-07. These results describe the local source and disposable f
 | Log boundaries | Malformed UTF-8/emoji raw cursors, secret rotation recovery, 7,000-byte secret under a 4,096-byte log cap, helper-capture truncation and 301-line capture regressions passed |
 | Generated contract/schema | Rust DTO/schema export ran successfully. Draft 2020-12 schema and six workload examples independently validated; runtime validation accepted all six |
 
-The complete `test_full.py --browser` run also passed using the rebuilt full binary. Hosted CI results are separate from these local checks and appear on each commit's GitHub checks.
+The complete `test_full.py --browser` run also passed using the rebuilt full binary. Full application verification runs locally before commit/push. Hosted CI only runs the fast repository migration/document-link checks; its status does not represent the full suite.
 
 ## Documentation fixes and pre-commit verification
 
@@ -32,7 +32,7 @@ Core/API/Full images were rebuilt from the current source and profile isolation 
 
 ## Additional failure-boundary tests
 
-The 2026-11-07 hardening pass added 35 Rust tests, 36 frontend unit cases and three browser scenarios beyond the original 93/20/12 suite. The added tests run through the normal Cargo, Vitest and Playwright commands in CI; no new test dependency or public DTO was introduced. Generated TypeScript/schema exports remained byte-for-byte unchanged.
+The 2026-11-07 hardening pass added 35 Rust tests, 36 frontend unit cases and three browser scenarios beyond the original 93/20/12 suite. The added tests run through the normal local Cargo, Vitest and Playwright commands; no new test dependency or public DTO was introduced. Generated TypeScript/schema exports remained byte-for-byte unchanged.
 
 | Boundary | New evidence and fixes |
 |---|---|

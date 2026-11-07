@@ -58,7 +58,7 @@ These instructions apply throughout this repository. Read [README.md](README.md)
 
 Meaningful behavior changes require meaningful tests; bug fixes need a regression test when practical. Exercise failure, recovery, and authorization paths where relevant. Do not add tests that only restate implementation details.
 
-Run checks appropriate to the affected code:
+Run checks appropriate to the affected code locally before committing or pushing:
 
 ```sh
 python3 scripts/check_repository.py
@@ -78,8 +78,10 @@ cargo run --locked --features full -- export-schema
 git diff -- web/dashboard/src/generated/contracts.ts schema/workload.schema.json
 ```
 
-Review and include the intended generated artifacts in the change. CI regenerates them and requires no drift from the reviewed versions. Inspect new/untracked files too; `git diff` alone does not show them. Do not discard legitimate generated changes to obtain a clean result.
+Review and include the intended generated artifacts in the change. Regenerate and check for drift locally before committing or pushing. Inspect new/untracked files too; `git diff` alone does not show them. Do not discard legitimate generated changes to obtain a clean result.
 
 For cross-layer changes, build Full and run `python3 scripts/test_full.py --browser` after installing Playwright Chromium. Executor/packaging changes also need the appropriate Docker acceptance scripts against an explicitly selected disposable daemon. Do not use production state for tests. Verify profile isolation when changing Cargo features.
+
+Keep GitHub Actions minimal: checkout and `python3 scripts/check_repository.py`, with a three-minute job timeout. Rust/frontend tests and builds, generated-artifact comparison, browser acceptance, dependency audits and Docker checks belong in local pre-commit/pre-push verification. Do not add heavyweight hosted checks unless the user explicitly requests them. GitHub's green repository check does not prove full application acceptance.
 
 Before finishing, inspect the final diff, verify relevant integrations and documentation, and report what changed, why, checks actually executed, and remaining risks/uncertainties. State skipped checks. Never claim a command passed merely because it was configured, passed in an older run, or was reported by another agent. Keep dated evidence in `docs/VERIFICATION.md` accurate.

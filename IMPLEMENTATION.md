@@ -49,6 +49,8 @@ For Docker, use `docker compose -f compose.full.yaml up --build -d`, then bootst
 
 ## Verification
 
+Run these checks locally before committing or pushing. GitHub Actions only runs `scripts/check_repository.py` with a three-minute job timeout; it does not repeat the full application suite.
+
 ```sh
 npm ci --prefix web/dashboard
 (cd web/dashboard && npx playwright install chromium)

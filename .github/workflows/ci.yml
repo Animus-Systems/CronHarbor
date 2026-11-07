@@ -1,37 +1,14 @@
-name: Application checks
-on: [push, pull_request, workflow_dispatch]
+name: Repository checks
+"on": [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+concurrency:
+  group: repository-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   application:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: web/dashboard/package-lock.json
       - run: python3 scripts/check_repository.py
-      - run: cargo fmt --all --check
-      - run: cargo test --locked --all-features --all-targets
-      - run: cargo clippy --locked --all-features --all-targets -- -D warnings
-      - run: cargo run --locked --features full -- export-types && cargo run --locked --features full -- export-schema
-      - run: git diff --exit-code -- web/dashboard/src/generated/contracts.ts schema/workload.schema.json
-      - run: npm ci && npm run typecheck && npm test && npm run build && npm audit
-        working-directory: web/dashboard
-      - run: npx playwright install --with-deps chromium
-        working-directory: web/dashboard
-      - run: cargo build --locked --features full && python3 scripts/test_full.py --browser
-      - run: docker build --target checks --tag cronharbor:checks .
-      - run: docker build --target core --tag cronharbor:dev . && python3 scripts/smoke_docker.py
-      - run: docker build --target api --tag cronharbor:api-dev .
-      - run: docker build --target full --tag cronharbor:full-dev .
-      - run: python3 scripts/smoke_full_docker.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: browser-verification
-          path: web/dashboard/test-results
-          if-no-files-found: ignore
