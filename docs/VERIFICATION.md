@@ -23,6 +23,20 @@ The resulting full Rust run passed 293 tests with zero skips/failures; dashboard
 typecheck, all 79 tests and build passed. Canonical types include optional
 `log_policy`; the limits-only projection adds no control authority or log data.
 
+The native Canarias fixture then exposed a second four-worker assumption in log
+capture. Independent nine-process output and capture-capacity lifecycle regressions
+were RED before increasing its separate log-memory bound to 128 captures (128 MiB
+of queued chunks, plus bounded reader/redaction overhead). No execution cap was
+reintroduced. All 295 Rust tests passed with zero failures or skips. Strict capture
+formatting and all-feature/all-target Clippy passed.
+
+The x86_64 native debug daemon proof passed 69 API-owned disabled definitions,
+6,900 next-due comparisons against the original Cronicle timings, nine simultaneous
+native Node 24 workers with split-secret redaction, read-only policy observation,
+storage-pressure admission, old operation replay and a hash-verified SQLite backup.
+It used private disposable state and synthetic effects only; it does not establish
+Canarias live migration, final optimized packaging or browser acceptance.
+
 Formatting and strict all-feature/all-target Clippy passed. Full browser acceptance,
 Canarias workload mapping, native packaging and live scheduler cutover remain
 unexecuted for this branch; these local results do not claim a completed migration.

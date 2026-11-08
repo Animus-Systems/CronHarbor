@@ -47,6 +47,60 @@ fn referenced_secret_is_injected_and_redacted_from_captured_logs() {
     let log = std::fs::read_to_string(s.log_path(&l.attempt_id).unwrap()).unwrap();
     assert_eq!(log, "[REDACTED]\n");
 }
+
+#[test]
+fn nine_simultaneous_native_jobs_retain_their_independent_output() {
+    let (_directory, mut store) = store();
+    for index in 0..9 {
+        let mut manifest = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
+        manifest.metadata.name = format!("capture-{index}");
+        manifest.spec.execution.args = vec![format!("capture-{index}")];
+        store.apply(&manifest, 0).unwrap();
+    }
+    let mut processes = Vec::new();
+    for _ in 0..9 {
+        let launch = store.claim_due(60_000_000).unwrap().unwrap();
+        store
+            .start_requested(&launch.attempt_id, 60_000_000)
+            .unwrap();
+        let process = RunningProcess::spawn(&launch, &mut store).unwrap();
+        store.running(&launch, process.pid(), 60_000_000).unwrap();
+        processes.push((launch, process));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !processes.is_empty() {
+        let mut index = 0;
+        while index < processes.len() {
+            if let Some(outcome) = processes[index].1.poll(&mut store).unwrap() {
+                let (launch, _) = processes.swap_remove(index);
+                assert_eq!(outcome.state, EndState::Succeeded);
+                assert!(
+                    !outcome.log_truncated,
+                    "quiet concurrent jobs must retain capture"
+                );
+                store.finish(&launch, &outcome, 61_000_000).unwrap();
+                let response = cronharbor::application::execute(
+                    &mut store,
+                    cronharbor::contracts::AppCommand::Logs {
+                        attempt_id: launch.attempt_id,
+                        offset: 0,
+                        max_bytes: 65536,
+                    },
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    response["text"],
+                    format!("{}\n", launch.manifest.metadata.name)
+                );
+            } else {
+                index += 1;
+            }
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 #[test]
 fn service_readiness_requires_a_passing_bounded_exec_probe() {
     let (_d, mut s) = store();

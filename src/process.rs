@@ -68,6 +68,7 @@ impl Outcome {
 
 const CAPTURE_MESSAGES: usize = 64;
 const CAPTURE_CHUNK: usize = 16_384;
+const MAX_CAPTURE_STREAMS: usize = 128;
 static CAPTURE_SLOTS: OnceLock<Mutex<BTreeMap<PathBuf, usize>>> = OnceLock::new();
 struct CaptureSlot {
     directory: PathBuf,
@@ -79,7 +80,7 @@ impl CaptureSlot {
             .lock()
             .ok()?;
         let count = slots.entry(directory.to_owned()).or_default();
-        if *count >= 4 {
+        if *count >= MAX_CAPTURE_STREAMS {
             return None;
         }
         *count += 1;
@@ -971,6 +972,23 @@ impl Drop for RunningProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_capacity_stays_bounded_and_releases_only_its_installation_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let independent = tempfile::tempdir().unwrap();
+        let mut held = (0..128)
+            .map(|_| CaptureSlot::acquire(directory.path()))
+            .collect::<Option<Vec<_>>>()
+            .expect("independent captures must fit the bounded capacity");
+        assert!(CaptureSlot::acquire(directory.path()).is_none());
+        let other = CaptureSlot::acquire(independent.path()).unwrap();
+        drop(held.pop());
+        let reclaimed = CaptureSlot::acquire(directory.path()).unwrap();
+        assert!(CaptureSlot::acquire(directory.path()).is_none());
+        drop((held, reclaimed, other));
+        assert!(CaptureSlot::acquire(directory.path()).is_some());
+    }
 
     struct ReadFailure;
     impl Read for ReadFailure {
