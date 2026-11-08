@@ -112,6 +112,9 @@ pub struct StatusDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub admission: Option<AdmissionStatusDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub log_policy: Option<LogStoragePolicyDto>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

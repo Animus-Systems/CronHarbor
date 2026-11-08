@@ -321,3 +321,37 @@ fn uncertainty_can_be_reconciled_using_reserved_space() {
     assert_eq!(store.status(false).unwrap().unknown, 0);
     assert_eq!(store.history().unwrap()[0].state, "SUCCEEDED");
 }
+
+#[test]
+fn read_only_monitor_can_check_policy_limits_without_log_or_control_authority() {
+    use cronharbor::{
+        application::execute,
+        contracts::{AppCommand, Role},
+    };
+    let directory = private_directory();
+    let mut store = Store::open(directory.path()).unwrap();
+    let credential = execute(
+        &mut store,
+        AppCommand::CreateToken {
+            role: Role::Observe,
+            namespaces: vec!["*".into()],
+            capabilities: vec!["instance.read".into()],
+            ttl_seconds: 60,
+        },
+        None,
+    )
+    .unwrap();
+    let token = credential["token"].as_str().unwrap();
+    let status = execute(&mut store, AppCommand::Status, Some(token)).unwrap();
+    assert_eq!(status["log_policy"]["max_disk_bytes"], 268435456);
+    assert_eq!(status["log_policy"]["max_segments"], 1024);
+    assert_eq!(status["log_policy"]["retention_seconds"], 604800);
+    assert!(status["log_policy"].get("streams").is_none());
+    assert!(status["log_policy"].get("files").is_none());
+    assert_eq!(
+        execute(&mut store, AppCommand::LogStorage, Some(token))
+            .unwrap_err()
+            .code,
+        "NOT_AUTHORIZED"
+    );
+}

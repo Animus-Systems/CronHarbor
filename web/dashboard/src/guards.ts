@@ -101,7 +101,8 @@ export const isStatus: Guard<StatusDto> = (v): v is StatusDto =>
   bool(v.restore_required) &&
   Array.isArray(v.adapter_health) &&
   v.adapter_health.every(isAdapterHealth) &&
-  (v.admission === undefined || isAdmission(v.admission));
+  (v.admission === undefined || isAdmission(v.admission)) &&
+  (v.log_policy === undefined || isLogStoragePolicy(v.log_policy));
 export const isExecution: Guard<ExecutionDto> = (v): v is ExecutionDto =>
   record(v) &&
   [

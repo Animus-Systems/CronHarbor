@@ -16,6 +16,13 @@ of malformed admission status and generic handling of HTTP 507. Canonical Rust t
 export adds optional admission status; the workload schema remains byte-identical.
 All eight repository checks passed. No applied migration changed.
 
+A follow-on status projection lets Observe with only `instance.read` inspect
+log-policy limits while the detailed LogStorage command stays denied. Its Rust and
+dashboard trust-boundary regressions were observed RED before implementation.
+The resulting full Rust run passed 293 tests with zero skips/failures; dashboard
+typecheck, all 79 tests and build passed. Canonical types include optional
+`log_policy`; the limits-only projection adds no control authority or log data.
+
 Formatting and strict all-feature/all-target Clippy passed. Full browser acceptance,
 Canarias workload mapping, native packaging and live scheduler cutover remain
 unexecuted for this branch; these local results do not claim a completed migration.

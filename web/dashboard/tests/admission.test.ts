@@ -25,4 +25,9 @@ describe("metadata admission boundary", () => {
       expect(isStatus({ ...status, admission: { ...admission, ...change } })).toBe(false);
     }
   });
+  it("validates read-only policy summaries without requiring log inventory", () => {
+    const policy = { revision: 1, max_disk_bytes: 268435456, max_segments: 1024, retention_seconds: 604800, imported_conservative: false };
+    expect(isStatus({ ...status, log_policy: policy })).toBe(true);
+    expect(isStatus({ ...status, log_policy: { ...policy, max_disk_bytes: "large" } })).toBe(false);
+  });
 });

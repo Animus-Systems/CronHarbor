@@ -217,6 +217,7 @@ fn dispatch(
                 restore_required: store.restore_required()?,
                 adapter_health: adapter_health(store)?,
                 admission: store.admission_status()?,
+                log_policy: Some(store.log_storage_policy()?),
             })
         }
         AppCommand::Workloads {

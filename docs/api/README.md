@@ -54,6 +54,11 @@ of workload/global pause and restore quarantine. New allocating commands return
 results. Cancellation, STOP and reconciliation remain available within the reserve.
 See [metadata storage admission](../RUNBOOK.md#metadata-storage-admission).
 
+Status also exposes optional `log_policy`, containing retention limits, revision and
+import provenance only. Read-only monitors can check these limits with `instance.read`.
+The detailed log-storage inventory and policy mutations retain their existing Admin
+authorization; status contains no log text, stream inventory or file paths.
+
 Log responses preserve raw `next_offset` and include canonical `stream` metadata: capture mode/state, retained start/end, retained bytes, known discarded bytes and expiry/truncation indicators. Rotation does not reset offsets. An explicit stale offset returns 409 `LOG_CURSOR_EXPIRED`; show the history gap and omit the offset to select/read the retained start within one owner command. This avoids a separate metadata/read race. Explicit offsets remain useful for paging and fail when their history has expired; offsets beyond the verified end are invalid. `/logs/info` remains available for inspection. Preserve attempt identity and bound retries. Missing retained files return unavailable evidence, never a fabricated complete stream.
 
 Remote service desired-state and restart requests require the current workload revision; stale or missing revision is rejected by the daemon.
