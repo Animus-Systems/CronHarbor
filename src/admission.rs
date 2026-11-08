@@ -62,7 +62,7 @@ pub(crate) fn load(directory: &Path) -> Result<Option<AdmissionPolicy>> {
     }
     let policy: AdmissionPolicy = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     if policy.max_database_bytes < 1_048_576
-        || policy.max_database_bytes > i64::MAX as u64
+        || policy.max_database_bytes > 9_007_199_254_740_991
         || policy.warning_bytes == 0
         || policy.warning_bytes >= policy.admission_pause_bytes
         || policy.admission_pause_bytes >= policy.max_database_bytes
@@ -78,8 +78,10 @@ pub(crate) fn configure(connection: &Connection, policy: &AdmissionPolicy) -> Re
     let page_size: u32 = connection.query_row("PRAGMA page_size", [], |r| r.get(0))?;
     let pages: u32 = connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
     let limit =
-        u32::try_from((policy.max_database_bytes / u64::from(page_size)).min(4_294_967_294))
-            .map_err(|_| invalid())?;
+        u32::try_from(policy.max_database_bytes / u64::from(page_size)).map_err(|_| invalid())?;
+    if limit == u32::MAX {
+        return Err(invalid());
+    }
     if pages > limit {
         return Err(pressure());
     }

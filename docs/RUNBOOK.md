@@ -220,7 +220,9 @@ The policy loads at startup and must have strictly increasing positive warning,
 pause and main-database ceilings. The main ceiling must be at least 1 MiB; the WAL
 waterline must be at least 4096 bytes and no greater than the main ceiling. Unknown
 fields, oversized files and unsafe permissions refuse startup. An absent policy
-adds no metadata quota. Applied schema migrations remain unchanged.
+adds no metadata quota. Limits must fit exact JSON integers and SQLite's actual
+page-count ceiling; oversized limits are rejected rather than silently clamped.
+Applied schema migrations remain unchanged.
 
 `status` and REST status expose optional `admission` policy/usage, warning and pause
 fields. The dashboard shows pressure in Overview and Settings. Usage measures

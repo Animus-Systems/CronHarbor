@@ -149,6 +149,20 @@ fn invalid_or_insecure_admission_policy_refuses_startup() {
 }
 
 #[test]
+fn policy_rejects_quotas_that_sqlite_or_json_cannot_represent_exactly() {
+    for max_bytes in [9_007_199_254_740_992_u64, 4_294_967_295_u64 * 4096] {
+        let directory = private_directory();
+        policy(directory.path(), 524_288);
+        let path = directory.path().join("admission-policy.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["maxDatabaseBytes"] = max_bytes.into();
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(Store::open(directory.path()).is_err());
+    }
+}
+
+#[test]
 fn database_pressure_stops_allocations_preserving_replay_and_settlement() {
     use cronharbor::{
         application::execute,
