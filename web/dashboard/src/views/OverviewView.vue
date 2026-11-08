@@ -231,8 +231,10 @@ const attention = computed(
       /><strong
         >Scheduler
         {{
-          d.status.value?.paused
-            ? "paused"
+          d.status.value?.admission?.paused
+            ? "paused by storage budget"
+            : d.status.value?.paused
+              ? "paused"
             : d.connected.value
               ? "connected"
               : "unavailable"

@@ -25,8 +25,6 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     (4, include_str!("../migrations/0004_log_streams.sql")),
     (5, include_str!("../migrations/0005_alert_deliveries.sql")),
 ];
-pub const MAX_ACTIVE: i64 = 4;
-
 struct OwnerLock(File);
 impl Drop for OwnerLock {
     fn drop(&mut self) {
@@ -39,6 +37,7 @@ pub struct Store {
     // SQLite must close before ownership is released, even when a child inherited the descriptor.
     _owner: OwnerLock,
     pub directory: PathBuf,
+    pub(crate) admission_policy: Option<crate::admission::AdmissionPolicy>,
     last_auth_rejection: Option<Instant>,
     pub(crate) alert_policy: crate::alerts::AlertCapturePolicy,
     pub(crate) alert_worker_unavailable: bool,
@@ -156,6 +155,7 @@ impl Store {
     ) -> Result<Self> {
         let alert_policy = crate::alerts::AlertCapturePolicy::from_config(alerts)?;
         let directory = private_directory(directory)?;
+        let admission_policy = crate::admission::load(&directory)?;
         let owner = secure_file(&directory.join("owner.lock"))?;
         owner.try_lock().map_err(|_| {
             Error::new(
@@ -213,6 +213,9 @@ impl Store {
             ));
         }
         connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;")?;
+        if let Some(policy) = &admission_policy {
+            crate::admission::configure(&connection, policy)?;
+        }
         let current: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if !(0..=i64::from(SCHEMA_VERSION)).contains(&current) {
             return Err(Error::new(
@@ -270,6 +273,7 @@ impl Store {
             connection,
             _owner: owner,
             directory,
+            admission_policy,
             last_auth_rejection: None,
             alert_policy,
             alert_worker_unavailable: false,
@@ -413,6 +417,7 @@ impl Store {
         actor: &str,
         now: i64,
     ) -> Result<String> {
+        self.ensure_admission()?;
         let (json, hash) = manifest.canonical()?;
         if !matches!(source, "FILE" | "API") || manifest.spec.owner.to_ascii_uppercase() != source {
             return Err(Error::new(
@@ -539,11 +544,13 @@ impl Store {
         if self.paused()? {
             return Ok(None);
         }
-        let tx = self.connection.transaction()?;
-        let active:i64=tx.query_row("SELECT count(*) FROM attempts WHERE state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN')",[],|r|r.get(0))?;
-        if active >= MAX_ACTIVE {
-            return Ok(None);
+        if let Err(error) = self.ensure_admission() {
+            if error.code == "STORAGE_PRESSURE" {
+                return Ok(None);
+            }
+            return Err(error);
         }
+        let tx = self.connection.transaction()?;
         if let Some(launch) = claim_retry(&tx, now)? {
             tx.commit()?;
             return Ok(Some(launch));

@@ -418,6 +418,11 @@ impl ApiError {
             "RATE_LIMITED" | "ALERT_QUEUE_FULL" => {
                 (429, "RATE_LIMITED", "Request limit reached; retry later")
             }
+            "STORAGE_PRESSURE" => (
+                507,
+                "STORAGE_PRESSURE",
+                "New work is paused by the metadata storage budget",
+            ),
             "PERSISTENCE_UNAVAILABLE" | "STORAGE_UNAVAILABLE" => {
                 (507, "STORAGE_UNAVAILABLE", "State storage is unavailable")
             }

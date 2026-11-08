@@ -23,6 +23,8 @@ const messages: Record<string, string> = {
   RATE_LIMITED: "The server is busy. Wait before trying again.",
   UNAVAILABLE:
     "The daemon or executor is unavailable. Check its health before trying again.",
+  STORAGE_UNAVAILABLE:
+    "State storage needs attention. Check metadata admission status and disk space before submitting new work.",
   SERVER_ERROR:
     "The server could not complete this request. Review server diagnostics using the request ID.",
   INVALID_RESPONSE:
@@ -84,6 +86,7 @@ function codeForStatus(status: number): string {
   if (status === 400 || status === 422) return "INVALID";
   if (status === 429) return "RATE_LIMITED";
   if (status === 503) return "UNAVAILABLE";
+  if (status === 507) return "STORAGE_UNAVAILABLE";
   return "SERVER_ERROR";
 }
 export class ApiClient {

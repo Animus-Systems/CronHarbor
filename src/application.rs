@@ -216,6 +216,7 @@ fn dispatch(
                 paused: store.paused()?,
                 restore_required: store.restore_required()?,
                 adapter_health: adapter_health(store)?,
+                admission: store.admission_status()?,
             })
         }
         AppCommand::Workloads {
@@ -692,6 +693,9 @@ fn dispatch(
             if desired_state == "RUNNING" && store.paused()? {
                 return Err(Error::new("RESTORE_REQUIRED", "Dispatch is paused"));
             }
+            if desired_state == "RUNNING" {
+                store.ensure_admission()?;
+            }
             operation(
                 store,
                 p,
@@ -983,6 +987,7 @@ fn dispatch(
                     return Err(policy::denied());
                 }
             }
+            store.ensure_admission()?;
             let id = uuid::Uuid::new_v4().to_string();
             let token = format!(
                 "ch_{}{}",
@@ -1394,6 +1399,9 @@ fn operation(
     let key_hash = format!("{:x}", Sha256::digest(key.as_bytes()));
     if let Some(value) = replay(store, p, key, digest)? {
         return Ok(value);
+    }
+    if !matches!(kind, "pause" | "cancel" | "reconcile" | "service_desired") {
+        store.ensure_admission()?;
     }
     let id = uuid::Uuid::new_v4().to_string();
     let now = crate::now_us();

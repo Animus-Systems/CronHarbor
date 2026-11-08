@@ -210,6 +210,8 @@ async function copySecret(): Promise<void> {
             {{
               d.status.value?.restore_required
                 ? "Restore quarantine"
+                : d.status.value?.admission?.paused
+                  ? "Paused by metadata storage budget"
                 : d.status.value?.paused
                   ? "Paused"
                   : "Enabled"
@@ -224,8 +226,22 @@ async function copySecret(): Promise<void> {
           <dt>Owner model</dt>
           <dd>Single active daemon</dd>
         </div>
+        <div v-if="d.status.value?.admission">
+          <dt>Metadata storage</dt>
+          <dd>
+            {{ d.status.value.admission.database_bytes.toLocaleString() }} /
+            {{ d.status.value.admission.policy.maxDatabaseBytes.toLocaleString() }} bytes ·
+            journal {{ d.status.value.admission.wal_bytes.toLocaleString() }} bytes
+          </dd>
+        </div>
       </dl>
       <div class="panel-content">
+        <p v-if="d.status.value?.admission?.warning" class="message warning" role="status">
+          Metadata storage needs attention. New work pauses at the configured
+          waterline; existing history is preserved. Review the private admission
+          policy before restarting the daemon. Cancellation and result recording
+          use the remaining reserve.
+        </p>
         <p class="hint">
           Log retention is controlled by the installation policy below. Backup,
           restore and executor allowlists use the trusted CLI and deployment configuration. Verify backups

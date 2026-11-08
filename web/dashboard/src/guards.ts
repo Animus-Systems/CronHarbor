@@ -2,6 +2,7 @@ import type {
   WorkloadDto,
   Role,
   StatusDto,
+  AdmissionStatusDto,
   ExecutionDto,
   OperationDto,
   LogDto,
@@ -85,6 +86,11 @@ export const isWorkload: Guard<WorkloadDto> = (v): v is WorkloadDto =>
   number(v.restart_count) &&
   Array.isArray(v.probe_history) &&
   v.probe_history.every(isProbeEvent);
+const isAdmission: Guard<AdmissionStatusDto> = (v): v is AdmissionStatusDto =>
+  record(v) && count(v.database_bytes) && count(v.wal_bytes) &&
+  bool(v.warning) && bool(v.paused) && record(v.policy) &&
+  count(v.policy.maxDatabaseBytes) && count(v.policy.warningBytes) &&
+  count(v.policy.admissionPauseBytes) && count(v.policy.maxWalBytes);
 export const isStatus: Guard<StatusDto> = (v): v is StatusDto =>
   record(v) &&
   string(v.sqlite_version) &&
@@ -94,7 +100,8 @@ export const isStatus: Guard<StatusDto> = (v): v is StatusDto =>
   bool(v.paused) &&
   bool(v.restore_required) &&
   Array.isArray(v.adapter_health) &&
-  v.adapter_health.every(isAdapterHealth);
+  v.adapter_health.every(isAdapterHealth) &&
+  (v.admission === undefined || isAdmission(v.admission));
 export const isExecution: Guard<ExecutionDto> = (v): v is ExecutionDto =>
   record(v) &&
   [

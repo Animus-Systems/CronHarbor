@@ -90,6 +90,17 @@ pub struct WorkloadDto {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
+pub struct AdmissionStatusDto {
+    #[ts(type = "number")]
+    pub database_bytes: u64,
+    #[ts(type = "number")]
+    pub wal_bytes: u64,
+    pub policy: crate::admission::AdmissionPolicy,
+    pub warning: bool,
+    pub paused: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct StatusDto {
     pub sqlite_version: String,
     pub workloads: u32,
@@ -98,6 +109,9 @@ pub struct StatusDto {
     pub paused: bool,
     pub restore_required: bool,
     pub adapter_health: Vec<AdapterHealthDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub admission: Option<AdmissionStatusDto>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -557,6 +571,8 @@ pub fn export_types(path: &std::path::Path) -> crate::Result<()> {
         ValidationDto::decl(&ts_rs::Config::default()),
         AuditDto::decl(&ts_rs::Config::default()),
         WorkloadDto::decl(&ts_rs::Config::default()),
+        crate::admission::AdmissionPolicy::decl(&ts_rs::Config::default()),
+        AdmissionStatusDto::decl(&ts_rs::Config::default()),
         StatusDto::decl(&ts_rs::Config::default()),
         ExecutionDto::decl(&ts_rs::Config::default()),
         OperationDto::decl(&ts_rs::Config::default()),

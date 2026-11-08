@@ -47,6 +47,13 @@ Security-sensitive singleton headers reject duplicates, including Authorization,
 
 Workload lifecycle mutations, config apply and installation log-policy updates require `Idempotency-Key` (1–128 printable bytes), return `202`, and carry the durable `OperationDto` from the daemon. A `Location` response header points to operation status. An accepted request can already have a final state if the daemon completed it synchronously; callers inspect the returned operation state. Acceptance never proves a process has started or stopped. Token administration is an audited immediate response; clients must not automatically retry token creation.
 
+When a private metadata admission policy is installed, status includes optional
+`admission` usage, policy, warning and pause fields. Storage admission is independent
+of workload/global pause and restore quarantine. New allocating commands return
+507 `STORAGE_PRESSURE` while held; existing operation keys retain their durable
+results. Cancellation, STOP and reconciliation remain available within the reserve.
+See [metadata storage admission](../RUNBOOK.md#metadata-storage-admission).
+
 Log responses preserve raw `next_offset` and include canonical `stream` metadata: capture mode/state, retained start/end, retained bytes, known discarded bytes and expiry/truncation indicators. Rotation does not reset offsets. An explicit stale offset returns 409 `LOG_CURSOR_EXPIRED`; show the history gap and omit the offset to select/read the retained start within one owner command. This avoids a separate metadata/read race. Explicit offsets remain useful for paging and fail when their history has expired; offsets beyond the verified end are invalid. `/logs/info` remains available for inspection. Preserve attempt identity and bound retries. Missing retained files return unavailable evidence, never a fabricated complete stream.
 
 Remote service desired-state and restart requests require the current workload revision; stale or missing revision is rejected by the daemon.

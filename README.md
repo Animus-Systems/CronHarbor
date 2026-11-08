@@ -26,6 +26,10 @@ CronHarbor records what it can verify. If a crash leaves an external effect unce
 
 The scope is one scheduling owner per installation. Distributed workers, workflow DAGs, and write-capable MCP are outside the current scope.
 
+Concurrency is limited per workload; there is no installation-wide execution cap.
+An optional private metadata admission budget pauses new work before storage fills,
+preserving history and space for settling existing executions. See the [runbook](docs/RUNBOOK.md#metadata-storage-admission).
+
 ## Operator console
 
 ![CronHarbor dashboard showing schedules, service state, execution slots, and executor observations](docs/assets/dashboard-overview.png)

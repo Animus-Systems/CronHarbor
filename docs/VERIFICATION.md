@@ -2,6 +2,24 @@
 
 Dated entries distinguish current verification from historical runs. These results describe the local source and disposable fixtures. They do not certify a production installation or replace the remaining release gates.
 
+## Canarias admission changes — 2026-11-08 (local branch)
+
+On x86_64 Linux, new admission regressions first reproduced the four-active global
+cap, accepted unsafe policy files, allocation under database/WAL pressure and
+unbounded main-page growth. After the changes, `cargo test --locked --all-features
+--all-targets` passed 292 tests across 32 targets, with zero failures or skips.
+The pinned Rust 1.99.1 checker includes Python/OpenSSL for existing fixtures.
+
+Dashboard typecheck, all 78 unit tests and the production build passed using the
+pinned Node 22 image. New trust-boundary tests first rejected the previous acceptance
+of malformed admission status and generic handling of HTTP 507. Canonical Rust type
+export adds optional admission status; the workload schema remains byte-identical.
+All eight repository checks passed. No applied migration changed.
+
+Formatting and strict all-feature/all-target Clippy passed. Full browser acceptance,
+Canarias workload mapping, native packaging and live scheduler cutover remain
+unexecuted for this branch; these local results do not claim a completed migration.
+
 ## Version 0.11.0 — 2026-11-08
 
 The Rust package, dashboard package, both lockfiles and README now identify version `0.11.0`. This release includes the review repairs below and the preceding logs/webhooks feature commit. The version bump changes no dependency versions, workload API version or applied migration; the installation remains at schema 5, including the feature commit's migrations 4 and 5.

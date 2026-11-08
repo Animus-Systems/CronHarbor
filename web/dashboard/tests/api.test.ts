@@ -80,6 +80,7 @@ describe("API trust boundaries", () => {
     [409, "CONFLICT"],
     [429, "RATE_LIMITED"],
     [503, "UNAVAILABLE"],
+    [507, "STORAGE_UNAVAILABLE"],
   ])("maps HTTP %i without displaying its untrusted body", async (status, code) => {
     vi.stubGlobal("fetch", async () => new Response("private internal error", {
       status,

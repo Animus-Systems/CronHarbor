@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod alerts;
 #[cfg(feature = "api")]
 pub mod api;

@@ -197,6 +197,57 @@ Job alerts follow final failure/timeout after automatic retries. `UNKNOWN` alert
 
 Ordinary pause keeps existing notifications deliverable. Restore quarantine holds the restored queue and creates no fresh source markers. Explicit evidence/cutoff resume expires historical held alerts instead of replaying them, then observes current actionable states. Review an individual expired row before retrying; backup restoration cannot guarantee continuous or exactly-once notification.
 
+## Metadata storage admission
+
+Concurrency limits apply independently to each workload. UNKNOWN retains its
+workload's capacity; unrelated workloads do not share a global execution cap.
+The bounded dispatch batch per daemon tick limits loop work, not active executions.
+Size each workload's limits for the host and downstream database/provider capacity.
+
+To bound metadata growth without deleting history or idempotency keys, create
+`STATE/admission-policy.json` as an owner-only regular file (0600, no links):
+
+```json
+{
+  "maxDatabaseBytes": 1073741824,
+  "warningBytes": 805306368,
+  "admissionPauseBytes": 939524096,
+  "maxWalBytes": 67108864
+}
+```
+
+The policy loads at startup and must have strictly increasing positive warning,
+pause and main-database ceilings. The main ceiling must be at least 1 MiB; the WAL
+waterline must be at least 4096 bytes and no greater than the main ceiling. Unknown
+fields, oversized files and unsafe permissions refuse startup. An absent policy
+adds no metadata quota. Applied schema migrations remain unchanged.
+
+`status` and REST status expose optional `admission` policy/usage, warning and pause
+fields. The dashboard shows pressure in Overview and Settings. Usage measures
+SQLite logical pages, including pages still in the WAL, and the physical WAL file.
+At the pause threshold, new dispatch, manual intents, definition changes and token
+creation stop before allocating rows; retries of existing operation keys still
+return their durable result. Repeated due ticks create no occurrences while held.
+Cancellation, service STOP, pause, reconciliation and recording existing outcomes
+remain available within the reserve. A storage pause does not change desired or
+workload pause state, and is separate from restore quarantine.
+
+SQLite's page ceiling bounds the main database, rounded down to whole pages. The
+WAL setting is an admission/checkpoint waterline, not a hard file ceiling: new or
+settling transactions can cross it. Above it the daemon attempts a non-waiting
+checkpoint before admitting more work. A pinned reader keeps admission paused
+until the journal can truncate. Disk exhaustion or exhausted settlement space can
+still prevent durable writes; errors remain errors and never prove an external
+effect failed. Inspect downstream evidence before reconciling UNKNOWN.
+
+No metadata is purged automatically to regain admission. Review capacity, stop
+unexpected writers/readers and adjust the private policy before a controlled
+restart, preserving active effects and their evidence. An existing database larger
+than the configured main ceiling refuses startup. Backups exclude this external
+policy file; transfer and verify it separately with deployment configuration.
+Captured logs, routine verified backups, incident archives and other disk usage
+need their own retention policies; they are not charged to this main-database cap.
+
 ## Backup, restore and upgrades
 
 ```sh
