@@ -4,6 +4,29 @@ Dated entries distinguish current verification from historical runs. These resul
 
 ## Canarias admission changes — 2026-11-08 (local branch)
 
+Latest local checks: 296 Rust tests across 32 targets passed with no failures or
+ignored tests; formatting, strict Clippy and eight repository checks passed. The
+quota-boundary regression reproduced and fixed acceptance of an inexact JSON
+integer or a silently clamped SQLite page limit. Dashboard 79 tests, strict types
+and build passed for the unchanged generated contracts and UI. Full browser
+acceptance passed 31 scenarios plus the separate-origin scenario. The main
+command skipped the owner-restart and origin fixtures; origin then passed in its
+dedicated run. The specialized owner-restart fixture subsequently passed in
+79.6 seconds, verifying frozen UNKNOWN evidence after a real owner restart and
+unavailability after a metadata-only restore. All 33 distinct browser scenarios
+therefore ran successfully across the three commands.
+
+The optimized x86_64 binary also passed a disposable Canarias integration proof:
+69 disabled definitions, 6,900 matching UTC occurrences, nine simultaneous native
+Node workers and nine synthetic effects, split-secret redaction on all nine,
+Observe denial for control, pressure/replay and verified backup. The Observe
+adapter reported 44 monitored jobs and 25 collectors in 2.57 seconds. Its SHA-256
+is `adea11fe10a640c46d443934769a625f0b4895aa5941cce0a8ea682983c380a0`.
+These fixtures used no business credentials or effects; live scheduler handover
+and the 24-hour observation are still pending.
+
+Earlier checks in this section retain their historical counts:
+
 On x86_64 Linux, new admission regressions first reproduced the four-active global
 cap, accepted unsafe policy files, allocation under database/WAL pressure and
 unbounded main-page growth. After the changes, `cargo test --locked --all-features
