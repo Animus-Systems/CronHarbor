@@ -1,6 +1,147 @@
 use cronharbor::external::{self, DockerSpec, ExecutorPolicy, Identity};
 
 #[test]
+fn docker_accepts_canonical_lowercase_environment_and_redacts_secret_references() {
+    use cronharbor::{
+        config::{Manifest, SecretRef},
+        process,
+    };
+    use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("docker");
+    fs::write(
+        &binary,
+        r##"#!/bin/sh
+shift 2
+case "$1" in
+inspect) if [ -f "$0.created" ]; then cat "$0.inspect"; else exit 1; fi ;;
+container) exit 0 ;;
+create)
+  shift
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --env-file ]; then
+      test "$(stat -c %a "$2" 2>/dev/null || stat -f %Lp "$2")" = 600 || exit 91
+      cat "$2" > "$0.env"
+    fi
+    shift
+  done
+  : > "$0.created"
+  printf 'created\n'
+  ;;
+start) exit 0 ;;
+logs) printf 'lowercase-secret\n' ;;
+*) exit 1 ;;
+esac
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let secret = directory.path().join("secret");
+    fs::write(&secret, "lowercase-secret").unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut manifest = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
+    manifest.spec.execution.adapter = "docker".into();
+    manifest.spec.execution.env =
+        BTreeMap::from([("http_proxy".into(), "http://proxy.invalid".into())]);
+    manifest.spec.execution.secret_refs = BTreeMap::from([(
+        "lower_secret".into(),
+        SecretRef::File {
+            path: secret.to_string_lossy().into_owned(),
+        },
+    )]);
+    let spec = DockerSpec {
+        image: format!("fixture@sha256:{}", "a".repeat(64)),
+        user: "10001".into(),
+        network: "none".into(),
+        memory_bytes: 8 * 1024 * 1024,
+        pids_limit: 8,
+    };
+    manifest.spec.execution.docker = Some(spec.clone());
+    manifest.validate().unwrap();
+    let env = process::resolve_environment(&manifest.spec.execution).unwrap();
+    let policy = ExecutorPolicy {
+        docker_enabled: true,
+        docker_binary: binary.to_string_lossy().into_owned(),
+        images: vec![spec.image.clone()],
+        ..ExecutorPolicy::default()
+    };
+    let identity = Identity {
+        instance_id: "instance".into(),
+        workload_id: "workload".into(),
+        revision_id: "revision".into(),
+        execution_id: "execution".into(),
+        launch_nonce: uuid::Uuid::new_v4().to_string(),
+    };
+    let handle = external::docker_handle(&identity);
+    fs::write(
+        binary.with_extension("inspect"),
+        serde_json::to_vec(&vec![docker_inspection(&handle)]).unwrap(),
+    )
+    .unwrap();
+    let started = external::start_docker(
+        &policy,
+        &spec,
+        &identity,
+        external::DockerContext {
+            command: "/bin/echo",
+            args: &[],
+            env: &env,
+            working_directory: "/tmp",
+        },
+        directory.path(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(binary.with_extension("env")).unwrap(),
+        "http_proxy=http://proxy.invalid\nlower_secret=lowercase-secret\n"
+    );
+    assert!(
+        !directory
+            .path()
+            .join(format!("{}.docker-env", identity.launch_nonce))
+            .exists()
+    );
+    let secrets = process::secret_values(&manifest.spec.execution, &env);
+    assert_eq!(
+        external::logs(&policy, &started, 4096, &secrets).unwrap().0,
+        b"[REDACTED]\n"
+    );
+
+    fs::remove_file(binary.with_extension("created")).unwrap();
+    for (key, value) in [
+        ("1bad", "ok"),
+        ("bad-name", "ok"),
+        ("", "ok"),
+        ("GOOD", "injected\nOTHER=value"),
+        ("GOOD", "injected\rvalue"),
+        ("GOOD", "injected\0value"),
+    ] {
+        let env = BTreeMap::from([(key.to_owned(), value.to_owned())]);
+        let error = external::start_docker(
+            &policy,
+            &spec,
+            &identity,
+            external::DockerContext {
+                command: "/bin/echo",
+                args: &[],
+                env: &env,
+                working_directory: "/tmp",
+            },
+            directory.path(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "CONFIG_INVALID");
+        assert!(
+            !directory
+                .path()
+                .join(format!("{}.docker-env", identity.launch_nonce))
+                .exists()
+        );
+        assert!(!binary.with_extension("created").exists());
+    }
+}
+
+#[test]
 fn external_executors_are_disabled_and_require_explicit_policy() {
     let dir = tempfile::tempdir().unwrap();
     let policy = external::load_policy(dir.path()).unwrap();

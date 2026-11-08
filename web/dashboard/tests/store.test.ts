@@ -5,6 +5,8 @@ import type {
   OperationDto,
   PrincipalDto,
   StatusDto,
+  WorkloadDto,
+  ExecutionDto,
 } from "../src/generated/contracts";
 const status: StatusDto = {
   sqlite_version: "3",
@@ -28,6 +30,38 @@ const operation: OperationDto = {
   kind: "run",
   created_at_us: 1,
   error_code: null,
+};
+const workload: WorkloadDto = {
+  id: "workload_head",
+  namespace: "default",
+  name: "head",
+  kind: "one_shot_job",
+  source_kind: "API",
+  revision_id: "revision_1",
+  enabled: true,
+  paused: false,
+  executor: "process",
+  schedule_description: null,
+  next_due_at_us: null,
+  desired_state: null,
+  observed_state: null,
+  restart_count: 0,
+  definition: "fixture",
+  probe_history: [],
+};
+const execution: ExecutionDto = {
+  execution_id: "execution_head",
+  attempt_id: "attempt_head",
+  workload_id: workload.id,
+  namespace: workload.namespace,
+  name: workload.name,
+  state: "SUCCEEDED",
+  due_at_us: null,
+  started_at_us: 1,
+  finished_at_us: 2,
+  error_code: null,
+  exit_code: 0,
+  log_truncated: false,
 };
 function json(value: unknown, code = 200): Response {
   return new Response(JSON.stringify(value), { status: code });
@@ -155,6 +189,28 @@ describe("asynchronous session boundaries", () => {
 });
 
 describe("snapshot and stream recovery", () => {
+  it.each([1800000000000, 1799999400000])("publishes snapshots with the actual wall-clock timestamp %i", async (now) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1800000000000);
+    vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/events")) return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+      if (input.endsWith("/session")) return json(principal);
+      return input.endsWith("/status") ? json(status) : json({ items: [], next_cursor: null });
+    });
+    try {
+      await dashboard.connect("http://127.0.0.1/api/v1", "private");
+      clock.mockReturnValue(now);
+      await dashboard.refresh();
+      expect(dashboard.lastRefresh.value).toBe(now);
+      const generation = dashboard.snapshotGeneration.value;
+      await dashboard.refresh();
+      expect(dashboard.lastRefresh.value).toBe(now);
+      expect(dashboard.snapshotGeneration.value).toBe(generation + 1);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
   it("shares one in-flight snapshot between reconnect and refresh callers", async () => {
     let complete: ((value: Response) => void) | undefined;
     let statusRequests = 0;
@@ -215,6 +271,103 @@ describe("snapshot and stream recovery", () => {
     await dashboard.connect("http://127.0.0.1/api/v1", "private");
     await vi.waitFor(() => expect(cancelled).toBe(1));
     expect(dashboard.connected.value).toBe(false);
+  });
+});
+
+describe.each(["workloads", "executions"] as const)("%s page snapshot ownership", (kind) => {
+  const head = kind === "workloads" ? workload : execution;
+  const middle = kind === "workloads"
+    ? { ...workload, id: "workload_middle" }
+    : { ...execution, execution_id: "execution_middle" };
+  const oldTail = kind === "workloads"
+    ? { ...workload, id: "workload_old_tail" }
+    : { ...execution, execution_id: "execution_old_tail" };
+  const cursor = kind === "workloads" ? dashboard.workloadCursor : dashboard.executionCursor;
+  const items = () => kind === "workloads" ? dashboard.workloads.value : dashboard.executions.value;
+
+  function stubPages(page: () => Promise<Response>): void {
+    vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/events")) return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+      if (input.includes(`/${kind}?limit=100&cursor=`)) return page();
+      if (input.endsWith("/session")) return json(principal);
+      if (input.endsWith("/status")) return json(status);
+      return json({ items: input.includes(`/${kind}?`) ? [head] : [], next_cursor: "same-cursor" });
+    });
+  }
+
+  it("discards a delayed old page after refresh even when the head returns the same cursor", async () => {
+    let finish: ((response: Response) => void) | undefined;
+    let requests = 0;
+    stubPages(async () => {
+      if (++requests === 1) return new Promise<Response>((resolve) => { finish = resolve; });
+      return json({ items: [middle], next_cursor: "next-cursor" });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "private");
+    const oldPage = dashboard.loadMore(kind);
+    await dashboard.refresh();
+    finish?.(json({ items: [oldTail], next_cursor: null }));
+    await oldPage;
+    expect(items()).toEqual([head]);
+    expect(cursor.value).toBe("same-cursor");
+    await dashboard.loadMore(kind);
+    expect(requests).toBe(2);
+    expect(items()).toEqual([head, middle]);
+    expect(cursor.value).toBe("next-cursor");
+  });
+
+  it("permits the refreshed page while the old request is still pending and ignores its failure", async () => {
+    let finish: ((response: Response) => void) | undefined;
+    let requests = 0;
+    stubPages(async () => {
+      if (++requests === 1) return new Promise<Response>((resolve) => { finish = resolve; });
+      return json({ items: [middle], next_cursor: null });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "private");
+    const oldPage = dashboard.loadMore(kind);
+    await dashboard.refresh();
+    await dashboard.loadMore(kind);
+    finish?.(json({}, 403));
+    await oldPage;
+    expect(requests).toBe(2);
+    expect(items()).toEqual([head, middle]);
+    expect(dashboard.error.value).toBe("");
+  });
+
+  it("sends one request for concurrent loads of the same page", async () => {
+    let finish: ((response: Response) => void) | undefined;
+    let requests = 0;
+    stubPages(() => {
+      requests++;
+      return new Promise<Response>((resolve) => { finish = resolve; });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "private");
+    const first = dashboard.loadMore(kind);
+    const repeated = dashboard.loadMore(kind);
+    expect(requests).toBe(1);
+    finish?.(json({ items: [middle], next_cursor: null }));
+    await Promise.all([first, repeated]);
+    expect(items()).toEqual([head, middle]);
+  });
+
+  it("lets a new session load while discarding the previous session's delayed success", async () => {
+    let finish: ((response: Response) => void) | undefined;
+    let requests = 0;
+    stubPages(async () => {
+      if (++requests === 1) return new Promise<Response>((resolve) => { finish = resolve; });
+      return json({ items: [middle], next_cursor: null });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "old");
+    const oldPage = dashboard.loadMore(kind);
+    await dashboard.connect("http://127.0.0.1/api/v1", "new");
+    await dashboard.loadMore(kind);
+    finish?.(json({ items: [oldTail], next_cursor: "old-cursor" }));
+    await oldPage;
+    expect(items()).toEqual([head, middle]);
+    expect(cursor.value).toBeNull();
+    dashboard.disconnect();
+    expect(cursor.value).toBeNull();
   });
 });
 
@@ -332,6 +485,51 @@ describe("session ownership during delayed requests", () => {
 });
 
 describe("manual ambiguous submission retry", () => {
+  it("preserves an HTTP 408 submission's original key and body until manual resolution", async () => {
+    const submitted: { key: string | null; body: BodyInit | null | undefined }[] = [];
+    vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/events")) return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+      if (init?.method === "POST") {
+        submitted.push({ key: new Headers(init.headers).get("Idempotency-Key"), body: init.body });
+        return submitted.length === 1 ? json({}, 408) : json(operation, 202);
+      }
+      if (input.endsWith("/session")) return json(principal);
+      return input.endsWith("/status") ? json(status) : json({ items: [], next_cursor: null });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "private");
+    const body = { definition: { args: ["reviewed"] } };
+    await dashboard.mutate("/config/apply", body);
+    body.definition.args[0] = "changed";
+    expect(dashboard.uncertain.value?.path).toBe("/config/apply");
+    expect(dashboard.canAct.value).toBe(false);
+    await dashboard.refresh();
+    await dashboard.mutate("/jobs/test/run");
+    expect(submitted).toHaveLength(1);
+    await dashboard.retryUncertain();
+    expect(submitted).toHaveLength(2);
+    expect(submitted[1]).toEqual(submitted[0]);
+    expect(dashboard.uncertain.value).toBeNull();
+  });
+
+  it.each([400, 409])("does not retain a rejected HTTP %i submission as uncertain", async (code) => {
+    let posts = 0;
+    vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/events")) return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+      if (init?.method === "POST") { posts++; return json({}, code); }
+      if (input.endsWith("/session")) return json(principal);
+      return input.endsWith("/status") ? json(status) : json({ items: [], next_cursor: null });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "private");
+    await dashboard.mutate("/jobs/test/run");
+    expect(dashboard.uncertain.value).toBeNull();
+    expect(dashboard.canAct.value).toBe(true);
+    await dashboard.retryUncertain();
+    expect(posts).toBe(1);
+  });
   it.each([
     [202, '{"id":'],
     [503, "private server detail"],

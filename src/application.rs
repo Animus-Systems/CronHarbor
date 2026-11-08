@@ -176,6 +176,21 @@ fn executor_permission(p: &Principal, m: &Manifest, id: Option<&str>) -> Result<
         _ => Ok(()),
     }
 }
+fn execution_manifest(store: &Store, execution_id: &str) -> Result<Manifest> {
+    let json: String = store.connection.query_row(
+        "SELECT r.spec_json FROM executions e JOIN workload_revisions r ON r.id=e.revision_id WHERE e.id=?1",
+        [execution_id],
+        |row| row.get(0),
+    )?;
+    Manifest::parse(&json)
+}
+fn active_executor_permissions(store: &Store, p: &Principal, workload: &str) -> Result<()> {
+    let mut query = store.connection.prepare("SELECT DISTINCT r.spec_json FROM executions e JOIN attempts a ON a.execution_id=e.id JOIN workload_revisions r ON r.id=e.revision_id WHERE e.workload_id=?1 AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN')")?;
+    for json in query.query_map([workload], |row| row.get::<_, String>(0))? {
+        executor_permission(p, &Manifest::parse(&json?)?, Some(workload))?;
+    }
+    Ok(())
+}
 fn dispatch(
     store: &mut Store,
     p: &Principal,
@@ -205,6 +220,7 @@ fn dispatch(
         }
         AppCommand::Workloads {
             namespace,
+            kind,
             cursor,
             limit,
         } => {
@@ -212,7 +228,14 @@ fn dispatch(
             if let Some(ns) = &namespace {
                 policy::namespace(p, ns)?;
             }
-            encode(workloads(store, p, namespace.as_deref(), cursor, limit)?)
+            encode(workloads(
+                store,
+                p,
+                namespace.as_deref(),
+                kind.as_deref(),
+                cursor,
+                limit,
+            )?)
         }
         AppCommand::Workload { id } => {
             let (id, _, _) = authorized_workload(store, p, &id, "workload.read")?;
@@ -443,6 +466,12 @@ fn dispatch(
             if !matches!(source_kind.as_str(), "FILE" | "API") {
                 return Err(input("Source kind must be FILE or API"));
             }
+            if local
+                && source_kind == "FILE"
+                && let Some(value) = replay(store, p, &idempotency_key, digest)?
+            {
+                return Ok(value);
+            }
             let existing =
                 store.manifest_for(&format!("{}/{}", m.metadata.namespace, m.metadata.name));
             let target = match &existing {
@@ -453,6 +482,12 @@ fn dispatch(
                 Err(_) => return existing.map(|_| Value::Null),
             };
             require_log_policy(store, p, existing.as_ref().ok().map(|row| &row.2), &m)?;
+            if m.kind == "Service"
+                && let Ok((_, _, old)) = &existing
+                && old.canonical()?.1 != m.canonical()?.1
+            {
+                active_executor_permissions(store, p, &target)?;
+            }
             let command_changed = match existing {
                 Ok((_, _, old)) => command_context_changed(&old, &m),
                 Err(_) => true,
@@ -504,14 +539,29 @@ fn dispatch(
             for definition in &definitions {
                 let m = Manifest::parse(definition)?;
                 policy::namespace(p, &m.metadata.namespace)?;
+                if !names.insert(format!("{}/{}", m.metadata.namespace, m.metadata.name)) {
+                    return Err(input("Apply batch contains duplicate workload identities"));
+                }
+                manifests.push(m);
+            }
+            if local
+                && source_kind == "FILE"
+                && let Some(value) = replay(store, p, &idempotency_key, digest)?
+            {
+                return Ok(value);
+            }
+            for m in &manifests {
                 let identity = format!("{}/{}", m.metadata.namespace, m.metadata.name);
                 let (target, changed) = match store.manifest_for(&identity) {
                     Ok((id, _, old)) => {
-                        require_log_policy(store, p, Some(&old), &m)?;
-                        (id, command_context_changed(&old, &m))
+                        require_log_policy(store, p, Some(&old), m)?;
+                        if m.kind == "Service" && old.canonical()?.1 != m.canonical()?.1 {
+                            active_executor_permissions(store, p, &id)?;
+                        }
+                        (id, command_context_changed(&old, m))
                     }
                     Err(error) if error.code == "NOT_FOUND" => {
-                        require_log_policy(store, p, None, &m)?;
+                        require_log_policy(store, p, None, m)?;
                         (identity, true)
                     }
                     Err(error) => return Err(error),
@@ -519,11 +569,7 @@ fn dispatch(
                 if changed {
                     policy::require(p, "executor.create_command", Some(&target))?;
                 }
-                executor_permission(p, &m, Some(&target))?;
-                if !names.insert(format!("{}/{}", m.metadata.namespace, m.metadata.name)) {
-                    return Err(input("Apply batch contains duplicate workload identities"));
-                }
-                manifests.push(m);
+                executor_permission(p, m, Some(&target))?;
             }
             operation(
                 store,
@@ -642,6 +688,7 @@ fn dispatch(
                 ));
             }
             executor_permission(p, &m, Some(&id))?;
+            active_executor_permissions(store, p, &id)?;
             if desired_state == "RUNNING" && store.paused()? {
                 return Err(Error::new("RESTORE_REQUIRED", "Dispatch is paused"));
             }
@@ -696,6 +743,7 @@ fn dispatch(
                 return Err(input("Workload is not a managed service"));
             }
             executor_permission(p, &m, Some(&id))?;
+            active_executor_permissions(store, p, &id)?;
             if store.paused()? {
                 return Err(Error::new("RESTORE_REQUIRED", "Dispatch is paused"));
             }
@@ -730,7 +778,7 @@ fn dispatch(
             idempotency_key,
         } => {
             let row = authorized_execution(store, p, &execution_id, "execution.read")?;
-            let (_, _, m) = store.manifest_for(&row.workload_id)?;
+            let m = execution_manifest(store, &execution_id)?;
             policy::require(p, control_capability(&m), Some(&row.workload_id))?;
             executor_permission(p, &m, Some(&row.workload_id))?;
             if let Some(value) = replay(store, p, &idempotency_key, digest)? {
@@ -807,7 +855,13 @@ fn dispatch(
                     tx.execute("UPDATE attempts SET state=?1,error_code='OPERATOR_RECONCILED',finished_at_us=?2 WHERE execution_id=?3 AND state='UNKNOWN'",params![state,now,execution_id])?;
                     tx.execute("UPDATE executions SET state=?1,finished_at_us=?2 WHERE id=?3 AND state='UNKNOWN'",params![state,now,execution_id])?;
                     tx.execute("UPDATE log_streams SET capture_state='SEALED' WHERE capture_state='FROZEN' AND attempt_id IN(SELECT id FROM attempts WHERE execution_id=?1)",[&execution_id])?;
-                    tx.execute("UPDATE service_instances SET observed_state='ABSENT',last_observed_at_us=?1 WHERE workload_id=?2 AND observed_state='UNKNOWN'",params![now,row.workload_id])?;
+                    tx.execute("UPDATE operations SET state=?1,error_code=?2,updated_at_us=?3 WHERE execution_id=?4 AND operation_kind='run' AND state IN('ACCEPTED','RUNNING','UNKNOWN')",params![if state=="SUCCEEDED"{"SUCCEEDED"}else{"FAILED"},if state=="SUCCEEDED"{None}else{Some("OPERATOR_RECONCILED")},now,execution_id])?;
+                    tx.execute("UPDATE operations SET state='SUCCEEDED',error_code=NULL,updated_at_us=?1 WHERE target_id=?2 AND operation_kind='cancel' AND state IN('ACCEPTED','RUNNING','UNKNOWN')",params![now,execution_id])?;
+                    let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts a JOIN executions e ON e.id=a.execution_id WHERE e.workload_id=?1 AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN'))",[&row.workload_id],|r|r.get(0))?;
+                    if !active {
+                        tx.execute("UPDATE service_instances SET observed_state='ABSENT',last_observed_at_us=?1 WHERE workload_id=?2 AND observed_state='UNKNOWN'",params![now,row.workload_id])?;
+                        tx.execute("UPDATE operations SET state='SUCCEEDED',error_code=NULL,updated_at_us=?1 WHERE target_id=?2 AND operation_kind='service_desired' AND state IN('ACCEPTED','RUNNING','UNKNOWN') AND json_extract(result_json,'$.desired_state')='STOPPED' AND EXISTS(SELECT 1 FROM service_instances si WHERE si.workload_id=?2 AND si.desired_state='STOPPED' AND si.revision_id=json_extract(operations.result_json,'$.revision_id'))",params![now,row.workload_id])?;
+                    }
                     event(
                         &tx,
                         "execution.reconciled",
@@ -1150,15 +1204,21 @@ fn workloads(
     store: &Store,
     p: &Principal,
     namespace: Option<&str>,
+    kind: Option<&str>,
     cursor: Option<String>,
     limit: u32,
 ) -> Result<Page<WorkloadDto>> {
     let limit = page_limit(limit)?;
     let cursor = cursor_id(cursor)?;
-    let mut q=store.connection.prepare("SELECT id FROM workloads WHERE id>?1 AND (?2 IS NULL OR namespace=?2) AND (?3 OR namespace IN(SELECT value FROM json_each(?4))) ORDER BY id LIMIT ?5")?;
+    if kind
+        .is_some_and(|kind| !matches!(kind, "scheduled_job" | "one_shot_job" | "managed_service"))
+    {
+        return Err(input("Invalid workload kind filter"));
+    }
+    let mut q=store.connection.prepare("SELECT id FROM workloads WHERE id>?1 AND (?2 IS NULL OR namespace=?2) AND (?3 OR namespace IN(SELECT value FROM json_each(?4))) AND (?6 IS NULL OR kind=?6) ORDER BY id LIMIT ?5")?;
     let ids = q
         .query_map(
-            params![cursor, namespace, wildcard(p), scopes(p)?, limit + 1],
+            params![cursor, namespace, wildcard(p), scopes(p)?, limit + 1, kind],
             |r| r.get::<_, String>(0),
         )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1588,7 +1648,7 @@ fn bind_service_operation(
     goal: &str,
     revision: &str,
 ) -> Result<()> {
-    store.connection.execute("UPDATE operations SET state='FAILED',error_code='OPERATION_SUPERSEDED',updated_at_us=?1 WHERE target_id=?2 AND id<>?3 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING')",params![crate::now_us(),workload,operation])?;
+    store.connection.execute("UPDATE operations SET state='FAILED',error_code='OPERATION_SUPERSEDED',updated_at_us=?1 WHERE target_id=?2 AND id<>?3 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING','UNKNOWN')",params![crate::now_us(),workload,operation])?;
     store.connection.execute(
         "UPDATE operations SET result_json=?1 WHERE id=?2",
         params![

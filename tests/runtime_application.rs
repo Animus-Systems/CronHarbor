@@ -76,20 +76,38 @@ fn revision_cas_file_ownership_and_manual_idempotency() {
     );
     assert!(s.claim_due(cronharbor::now_us()).unwrap().is_some());
     assert!(s.claim_due(cronharbor::now_us()).unwrap().is_none());
+    for (index, expected_revision) in [None, Some("stale-revision".into())]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            application::execute(
+                &mut s,
+                AppCommand::Apply {
+                    definition: definition.clone(),
+                    expected_revision,
+                    source_kind: "API".into(),
+                    idempotency_key: format!("update-{index}")
+                },
+                None
+            )
+            .unwrap_err()
+            .code,
+            "REVISION_CONFLICT"
+        );
+    }
+    let revision = s.manifest_for("local/manual").unwrap().1;
     assert_eq!(
-        application::execute(
+        call(
             &mut s,
             AppCommand::Apply {
                 definition,
-                expected_revision: None,
+                expected_revision: Some(revision),
                 source_kind: "API".into(),
-                idempotency_key: "update".into()
-            },
-            None
-        )
-        .unwrap_err()
-        .code,
-        "REVISION_CONFLICT"
+                idempotency_key: "current-update".into()
+            }
+        )["state"],
+        "SUCCEEDED"
     );
 }
 #[test]
@@ -230,6 +248,7 @@ fn namespace_and_log_grants_apply_inside_shared_queries() {
         &mut s,
         AppCommand::Workloads {
             namespace: None,
+            kind: None,
             cursor: None,
             limit: 10,
         },
@@ -263,6 +282,94 @@ fn namespace_and_log_grants_apply_inside_shared_queries() {
             .iter()
             .any(|row| row["action"] == "mcp.workloads")
     );
+}
+
+#[test]
+fn workload_kind_filter_preserves_scope_and_rejects_unknown_kinds() {
+    use cronharbor::{config::Manifest, contracts::Role};
+    use serde_json::json;
+    let (_directory, mut store) = setup();
+    for (name, namespace, kind) in [
+        ("service", "local", "Service"),
+        ("hidden", "elsewhere", "Service"),
+        ("job", "local", "OneShotJob"),
+    ] {
+        let mut definition = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
+        definition.metadata.name = name.into();
+        definition.metadata.namespace = namespace.into();
+        definition.kind = kind.into();
+        store.apply(&definition, 0).unwrap();
+    }
+    let credential = call(
+        &mut store,
+        AppCommand::CreateToken {
+            role: Role::Observe,
+            namespaces: vec!["local".into()],
+            capabilities: vec!["workload.read".into()],
+            ttl_seconds: 3600,
+        },
+    );
+    let token = credential["token"].as_str().unwrap();
+    let legacy: AppCommand = serde_json::from_value(
+        json!({"action":"workloads", "namespace":null, "cursor":null, "limit":100}),
+    )
+    .unwrap();
+    assert!(serde_json::to_value(&legacy).unwrap().get("kind").is_none());
+    assert_eq!(
+        application::execute(&mut store, legacy, Some(token)).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    for (kind, expected) in [
+        ("managed_service", 1),
+        ("one_shot_job", 1),
+        ("scheduled_job", 0),
+    ] {
+        let page = application::execute(
+            &mut store,
+            AppCommand::Workloads {
+                namespace: None,
+                kind: Some(kind.into()),
+                cursor: None,
+                limit: 1,
+            },
+            Some(token),
+        )
+        .unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), expected);
+        assert!(page["next_cursor"].is_null());
+        if expected > 0 {
+            assert_eq!(page["items"][0]["namespace"], "local");
+        }
+    }
+    for kind in ["Service", "unknown", "managed_service\0"] {
+        let error = application::execute(
+            &mut store,
+            AppCommand::Workloads {
+                namespace: None,
+                kind: Some(kind.into()),
+                cursor: None,
+                limit: 1,
+            },
+            Some(token),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "INPUT_INVALID");
+    }
+    let error = application::execute(
+        &mut store,
+        AppCommand::Workloads {
+            namespace: Some("elsewhere".into()),
+            kind: Some("managed_service".into()),
+            cursor: None,
+            limit: 1,
+        },
+        Some(token),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "NOT_AUTHORIZED");
 }
 #[test]
 fn idempotent_manual_replay_survives_a_later_global_pause() {

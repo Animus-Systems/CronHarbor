@@ -423,6 +423,13 @@ impl Store {
         let _ = checked_file(&self.directory, relative, false)?;
         Ok(full)
     }
+    /// Call only with a freshly verified, redacted external terminal snapshot.
+    pub fn prepare_external_log_capture(&self, launch: &Launch) -> Result<()> {
+        ensure_stream(&self.connection, launch, crate::now_us())?;
+        // Recovery may freeze an empty stream before ownership and original secrets are rebuilt.
+        self.connection.execute("UPDATE log_streams SET capture_state='PREPARED',closed_at_us=NULL WHERE attempt_id=?1 AND capture_mode='EXTERNAL_SNAPSHOT' AND capture_state='FROZEN' AND written_end_offset=0 AND truncated=0 AND last_error_code IS NULL AND NOT EXISTS(SELECT 1 FROM log_segments WHERE stream_id=log_streams.id) AND EXISTS(SELECT 1 FROM attempts a WHERE a.id=?1 AND a.state IN('START_REQUESTED','RUNNING','UNKNOWN'))",[&launch.attempt_id])?;
+        self.prepare_log_capture(launch)
+    }
     pub fn prepare_log_capture(&self, launch: &Launch) -> Result<()> {
         ensure_stream(&self.connection, launch, crate::now_us())?;
         if self.log_info(&launch.attempt_id)?.capture_state == LogCaptureState::Prepared {

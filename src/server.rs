@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self},
     io::{Read, Write},
     os::unix::{
@@ -261,6 +262,8 @@ pub fn run_with_settings(
     let mut native: Vec<(Launch, RunningProcess)> = Vec::new();
     let mut pending: Vec<PendingStart> = Vec::new();
     let mut external: Vec<ExternalWatch> = Vec::new();
+    // UNKNOWN keeps its capacity reservation and original deadline across reattachment.
+    let mut external_deadlines = BTreeMap::new();
     let mut cleanup: Option<(String, thread::JoinHandle<bool>)> = None;
     let mut recovered_at = Instant::now() - Duration::from_secs(10);
     let mut retained_at = Instant::now();
@@ -360,12 +363,11 @@ pub fn run_with_settings(
                         let encoded =
                             serde_json::to_string(&handle).map_err(|_| transport_error())?;
                         store.running_handle(&item.launch, &encoded, now)?;
-                        let started = store.attempt_started_at(&item.launch.attempt_id)?;
                         external.push(ExternalWatch::new(
                             item.launch,
                             handle,
                             item.secrets,
-                            started,
+                            item.deadline,
                         ));
                     }
                     Ok(Err(error)) => {
@@ -378,6 +380,9 @@ pub fn run_with_settings(
                             unknown_outcome("EXECUTOR_UNAVAILABLE")
                         };
                         store.finish(&item.launch, &outcome, now)?;
+                        if outcome.state != EndState::Unknown {
+                            external_deadlines.remove(&item.launch.attempt_id);
+                        }
                     }
                     Err(_) => {
                         store.finish(&item.launch, &unknown_outcome("EXECUTOR_UNAVAILABLE"), now)?
@@ -390,6 +395,7 @@ pub fn run_with_settings(
         let mut index = 0;
         while index < external.len() {
             if !store.attempt_is_observable(&external[index].launch.attempt_id)? {
+                external_deadlines.remove(&external[index].launch.attempt_id);
                 external[index].retired.store(true, Ordering::Relaxed);
                 if external[index]
                     .task
@@ -409,6 +415,7 @@ pub fn run_with_settings(
                 || store.service_should_stop(&external[index].launch)?;
             match external[index].poll(stop, &store.directory) {
                 Some(ExternalResult::Retired) => {
+                    external_deadlines.remove(&external[index].launch.attempt_id);
                     external.swap_remove(index);
                 }
                 Some(ExternalResult::Running(healthy)) => {
@@ -439,7 +446,7 @@ pub fn run_with_settings(
                     let logs_persisted = if let Some(bytes) = snapshot {
                         let launch = &external[index].launch;
                         let saved = store
-                            .prepare_log_capture(launch)
+                            .prepare_external_log_capture(launch)
                             .and_then(|()| store.append_log(launch, &bytes));
                         match saved {
                             Ok(saved) => {
@@ -463,6 +470,9 @@ pub fn run_with_settings(
                         &external[index].handle,
                         now,
                     )?;
+                    if outcome.state != EndState::Unknown {
+                        external_deadlines.remove(&external[index].launch.attempt_id);
+                    }
                     external.swap_remove(index);
                 }
                 None => index += 1,
@@ -503,6 +513,7 @@ pub fn run_with_settings(
             && recovered_at.elapsed() >= Duration::from_secs(10)
         {
             recovered_at = Instant::now();
+            prune_external_deadlines(&store, &mut external_deadlines)?;
             for (launch, handle) in store.recoverable_external()? {
                 if external
                     .iter()
@@ -518,7 +529,15 @@ pub fn run_with_settings(
                     None
                 };
                 let started = store.attempt_started_at(&launch.attempt_id)?;
-                external.push(ExternalWatch::new(launch, handle, secrets, started));
+                external.push(ExternalWatch::recover(
+                    launch,
+                    handle,
+                    secrets,
+                    started,
+                    crate::now_us(),
+                    Instant::now(),
+                    &mut external_deadlines,
+                ));
             }
         }
         if retained_at.elapsed() >= Duration::from_secs(1) {
@@ -578,7 +597,13 @@ pub fn run_with_settings(
                 let Some(launch) = store.claim_due(crate::now_us())? else {
                     break;
                 };
-                dispatch(&mut store, launch, &mut native, &mut pending)?;
+                dispatch(
+                    &mut store,
+                    launch,
+                    &mut native,
+                    &mut pending,
+                    &mut external_deadlines,
+                )?;
             }
         }
         thread::sleep(Duration::from_millis(20));
@@ -610,12 +635,29 @@ struct PendingStart {
     launch: Launch,
     task: thread::JoinHandle<Result<crate::external::ExternalHandle>>,
     secrets: Option<Vec<Vec<u8>>>,
+    deadline: Option<Instant>,
+}
+fn external_deadline(manifest: &Manifest, now: Instant, elapsed: Duration) -> Option<Instant> {
+    (manifest.kind != "Service")
+        .then(|| now + Duration::from_secs(manifest.spec.timeout_seconds).saturating_sub(elapsed))
+}
+fn prune_external_deadlines(
+    store: &Store,
+    deadlines: &mut BTreeMap<String, Option<Instant>>,
+) -> Result<()> {
+    for attempt in deadlines.keys().cloned().collect::<Vec<_>>() {
+        if !store.attempt_is_observable(&attempt)? {
+            deadlines.remove(&attempt);
+        }
+    }
+    Ok(())
 }
 fn dispatch(
     store: &mut Store,
     launch: Launch,
     native: &mut Vec<(Launch, RunningProcess)>,
     pending: &mut Vec<PendingStart>,
+    external_deadlines: &mut BTreeMap<String, Option<Instant>>,
 ) -> Result<()> {
     if launch.manifest.spec.execution.adapter == "process" {
         store.retain_logs()?;
@@ -637,6 +679,7 @@ fn dispatch(
         }
         return Ok(());
     }
+    prune_external_deadlines(store, external_deadlines)?;
     let identity = store.external_identity(&launch)?;
     let execution = launch.manifest.spec.execution.clone();
     let handle = if execution.adapter == "docker" {
@@ -653,11 +696,14 @@ fn dispatch(
         }
     };
     store.persist_external_intent(&launch.attempt_id, &handle)?;
+    let deadline = external_deadline(&launch.manifest, Instant::now(), Duration::ZERO);
     store.start_requested(&launch.attempt_id, crate::now_us())?;
+    external_deadlines.insert(launch.attempt_id.clone(), deadline);
     let env = match crate::process::resolve_environment(&execution) {
         Ok(env) => env,
         Err(_) => {
             store.finish(&launch, &Outcome::rejected(), crate::now_us())?;
+            external_deadlines.remove(&launch.attempt_id);
             return Ok(());
         }
     };
@@ -691,6 +737,7 @@ fn dispatch(
         launch,
         task,
         secrets,
+        deadline,
     });
     Ok(())
 }
@@ -706,15 +753,32 @@ struct ExternalWatch {
     secrets: Option<Vec<Vec<u8>>>,
     task: Option<thread::JoinHandle<ExternalResult>>,
     next: Instant,
-    started_at_us: i64,
+    deadline: Option<Instant>,
+    timed_out: bool,
     stopping: bool,
 }
 impl ExternalWatch {
-    fn new(
+    fn recover(
         launch: Launch,
         handle: crate::external::ExternalHandle,
         secrets: Option<Vec<Vec<u8>>>,
         started_at_us: i64,
+        now_us: i64,
+        now: Instant,
+        deadlines: &mut BTreeMap<String, Option<Instant>>,
+    ) -> Self {
+        let elapsed =
+            Duration::from_micros(u64::try_from(now_us.saturating_sub(started_at_us)).unwrap_or(0));
+        let deadline = *deadlines
+            .entry(launch.attempt_id.clone())
+            .or_insert_with(|| external_deadline(&launch.manifest, now, elapsed));
+        Self::new(launch, handle, secrets, deadline)
+    }
+    fn new(
+        launch: Launch,
+        handle: crate::external::ExternalHandle,
+        secrets: Option<Vec<Vec<u8>>>,
+        deadline: Option<Instant>,
     ) -> Self {
         Self {
             retired: Arc::new(AtomicBool::new(false)),
@@ -723,29 +787,29 @@ impl ExternalWatch {
             secrets,
             task: None,
             next: Instant::now(),
-            started_at_us,
+            deadline,
+            timed_out: false,
             stopping: false,
         }
     }
     fn poll(&mut self, cancel: bool, directory: &Path) -> Option<ExternalResult> {
-        let timed_out = self.launch.manifest.kind != "Service"
-            && crate::now_us().saturating_sub(self.started_at_us)
-                >= i64::try_from(self.launch.manifest.spec.timeout_seconds)
-                    .unwrap_or(i64::MAX)
-                    .saturating_mul(1_000_000);
-        self.stopping |= cancel || timed_out;
+        self.poll_at(cancel, directory, Instant::now())
+    }
+    fn poll_at(&mut self, cancel: bool, directory: &Path, now: Instant) -> Option<ExternalResult> {
+        self.timed_out |= self.deadline.is_some_and(|deadline| now >= deadline);
+        self.stopping |= cancel || self.timed_out;
         if self
             .task
             .as_ref()
             .is_some_and(thread::JoinHandle::is_finished)
         {
             let task = self.task.take()?;
-            self.next = Instant::now() + Duration::from_secs(1);
+            self.next = now + Duration::from_secs(1);
             return Some(task.join().unwrap_or_else(|_| {
                 ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None)
             }));
         }
-        if self.task.is_some() || Instant::now() < self.next {
+        if self.task.is_some() || now < self.next {
             return None;
         }
         let stopping = self.stopping;
@@ -764,7 +828,7 @@ impl ExternalWatch {
             .collect::<Vec<_>>();
         let cap = self.launch.manifest.spec.logs.max_run_bytes.min(1_048_576);
         let grace = self.launch.manifest.spec.service.stop_grace_seconds;
-        let stop_state = if timed_out {
+        let stop_state = if self.timed_out {
             EndState::TimedOut
         } else {
             EndState::Cancelled
@@ -812,7 +876,11 @@ impl ExternalWatch {
                     if stopping {
                         Outcome {
                             state: stop_state,
-                            error_code: Some("CANCELLED_BY_OPERATOR"),
+                            error_code: Some(if stop_state == EndState::TimedOut {
+                                "DEADLINE_EXCEEDED"
+                            } else {
+                                "CANCELLED_BY_OPERATOR"
+                            }),
                             exit_code: None,
                             log_bytes: 0,
                             log_truncated: true,
@@ -932,7 +1000,333 @@ fn handle(store: &mut Store, stream: &mut UnixStream, paused: bool) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
+
+    fn external_test_launch() -> Launch {
+        let mut manifest = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
+        manifest.kind = "OneShotJob".into();
+        manifest.spec.timeout_seconds = 5;
+        Launch {
+            attempt_id: "attempt".into(),
+            execution_id: "execution".into(),
+            launch_nonce: "nonce".into(),
+            due_at_us: 0,
+            manifest,
+        }
+    }
+    fn external_test_handle() -> crate::external::ExternalHandle {
+        crate::external::ExternalHandle::Systemd {
+            unit: "worker.service".into(),
+            since_us: Some(1),
+        }
+    }
+
+    fn external_test_policy(directory: &Path) -> PathBuf {
+        let helper = directory.join("systemctl");
+        fs::write(&helper, r##"#!/bin/sh
+case "$1" in
+start)
+  : > "$0.starting"
+  count=0
+  while [ ! -f "$0.release" ] && [ "$count" -lt 200 ]; do sleep 0.01; count=$((count + 1)); done
+  ;;
+show)
+  if [ -f "$0.block-show" ]; then
+    : > "$0.observing"
+    count=0
+    while [ ! -f "$0.release" ] && [ "$count" -lt 200 ]; do sleep 0.01; count=$((count + 1)); done
+    rm "$0.block-show"
+  fi
+  active=active
+  if [ -f "$0.stopped" ]; then active=inactive; fi
+  printf 'LoadState=loaded\nActiveState=%s\nResult=success\nExecMainCode=1\nExecMainStatus=0\n' "$active"
+  ;;
+stop) : > "$0.stopped" ;;
+--no-pager) printf 'safe evidence\n' ;;
+*) exit 1 ;;
+esac
+"##).unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = crate::external::ExecutorPolicy {
+            systemd_enabled: true,
+            systemctl_binary: helper.to_string_lossy().into_owned(),
+            journalctl_binary: helper.to_string_lossy().into_owned(),
+            units: vec!["worker.service".into()],
+            ..crate::external::ExecutorPolicy::default()
+        };
+        let path = directory.join("executors.json");
+        fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        helper
+    }
+
+    fn wait_for_external_test(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready() {
+            assert!(
+                Instant::now() < deadline,
+                "external helper did not make progress"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn fresh_external_budget_includes_pending_start_and_reconciled_entries_are_retired() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        let helper = external_test_policy(directory.path());
+        let mut manifest = external_test_launch().manifest;
+        manifest.spec.execution.adapter = "systemd".into();
+        manifest.spec.execution.command.clear();
+        manifest.spec.execution.args.clear();
+        manifest.spec.execution.systemd = Some(crate::external::SystemdSpec {
+            unit: "worker.service".into(),
+        });
+        store.apply(&manifest, crate::now_us()).unwrap();
+        crate::application::execute(
+            &mut store,
+            crate::contracts::AppCommand::Run {
+                id: "local/hello".into(),
+                idempotency_key: "start-budget".into(),
+            },
+            None,
+        )
+        .unwrap();
+        let launch = store.claim_due(crate::now_us()).unwrap().unwrap();
+        let attempt = launch.attempt_id.clone();
+        let execution = launch.execution_id.clone();
+        let before = Instant::now();
+        let mut deadlines = BTreeMap::new();
+        let mut pending = Vec::new();
+        dispatch(
+            &mut store,
+            launch,
+            &mut Vec::new(),
+            &mut pending,
+            &mut deadlines,
+        )
+        .unwrap();
+        let after = Instant::now();
+        let item = pending.pop().unwrap();
+        assert!(
+            item.deadline
+                .is_some_and(|deadline| deadline >= before + Duration::from_secs(5)
+                    && deadline <= after + Duration::from_secs(5))
+        );
+        assert_eq!(deadlines[&attempt], item.deadline);
+        wait_for_external_test(|| helper.with_extension("starting").exists());
+        assert!(!item.task.is_finished());
+        fs::write(helper.with_extension("release"), "").unwrap();
+        let handle = item.task.join().unwrap().unwrap();
+        let mut watch = ExternalWatch::new(item.launch, handle, item.secrets, item.deadline);
+        watch.next = before + Duration::from_secs(20);
+        assert!(
+            watch
+                .poll_at(false, directory.path(), after + Duration::from_secs(5))
+                .is_none()
+        );
+        assert!(watch.timed_out);
+        store
+            .finish(
+                &watch.launch,
+                &unknown_outcome("EXECUTOR_UNAVAILABLE"),
+                crate::now_us(),
+            )
+            .unwrap();
+        prune_external_deadlines(&store, &mut deadlines).unwrap();
+        assert!(
+            deadlines.contains_key(&attempt),
+            "UNKNOWN lost its reserved deadline"
+        );
+        drop(watch);
+        crate::application::execute(
+            &mut store,
+            crate::contracts::AppCommand::Reconcile {
+                execution_id: execution,
+                state: "SUCCEEDED".into(),
+                evidence: "verified external completion".into(),
+                idempotency_key: "retire-budget".into(),
+            },
+            None,
+        )
+        .unwrap();
+        prune_external_deadlines(&store, &mut deadlines).unwrap();
+        assert!(
+            deadlines.is_empty(),
+            "reconciled UNKNOWN without a watch retained historical cache state"
+        );
+    }
+
+    #[test]
+    fn deadline_during_an_active_helper_stays_timed_out_through_async_stop() {
+        let directory = tempfile::tempdir().unwrap();
+        let helper = external_test_policy(directory.path());
+        fs::write(helper.with_extension("block-show"), "").unwrap();
+        let now = Instant::now();
+        let mut watch = ExternalWatch::new(
+            external_test_launch(),
+            external_test_handle(),
+            Some(Vec::new()),
+            Some(now + Duration::from_secs(5)),
+        );
+        watch.next = now;
+        assert!(watch.poll_at(false, directory.path(), now).is_none());
+        wait_for_external_test(|| helper.with_extension("observing").exists());
+        assert!(
+            watch
+                .poll_at(false, directory.path(), now + Duration::from_secs(5))
+                .is_none()
+        );
+        assert!(watch.timed_out);
+        fs::write(helper.with_extension("release"), "").unwrap();
+        wait_for_external_test(|| {
+            watch
+                .task
+                .as_ref()
+                .is_some_and(thread::JoinHandle::is_finished)
+        });
+        assert!(matches!(
+            watch.poll_at(false, directory.path(), now + Duration::from_secs(5)),
+            Some(ExternalResult::Running(_))
+        ));
+        assert!(
+            watch
+                .poll_at(true, directory.path(), now + Duration::from_secs(6))
+                .is_none()
+        );
+        wait_for_external_test(|| {
+            watch
+                .task
+                .as_ref()
+                .is_some_and(thread::JoinHandle::is_finished)
+        });
+        let Some(ExternalResult::Finished(outcome, _)) =
+            watch.poll_at(true, directory.path(), now + Duration::from_secs(7))
+        else {
+            panic!("missing terminal external result")
+        };
+        assert_eq!(outcome.state, EndState::TimedOut);
+        assert_eq!(outcome.error_code, Some("DEADLINE_EXCEEDED"));
+        assert!(helper.with_extension("stopped").exists());
+    }
+
+    #[test]
+    fn recovered_jobs_consume_elapsed_time_once_and_services_have_no_deadline() {
+        let now = Instant::now();
+        let directory = tempfile::tempdir().unwrap();
+        for (started, wall_now, expected) in [
+            (18_000_000, 20_000_000, 3),
+            (18_000_000, 30_000_000, 0),
+            (i64::MIN, i64::MAX, 0),
+        ] {
+            let watch = ExternalWatch::recover(
+                external_test_launch(),
+                external_test_handle(),
+                Some(Vec::new()),
+                started,
+                wall_now,
+                now,
+                &mut BTreeMap::new(),
+            );
+            assert_eq!(watch.deadline, Some(now + Duration::from_secs(expected)));
+        }
+        let mut launch = external_test_launch();
+        launch.manifest.kind = "Service".into();
+        let mut watch = ExternalWatch::recover(
+            launch,
+            external_test_handle(),
+            Some(Vec::new()),
+            i64::MIN,
+            i64::MAX,
+            now,
+            &mut BTreeMap::new(),
+        );
+        assert_eq!(watch.deadline, None);
+        watch.next = now + Duration::from_secs(172_800);
+        assert!(
+            watch
+                .poll_at(false, directory.path(), now + Duration::from_secs(86_400))
+                .is_none()
+        );
+        assert!(!watch.stopping);
+    }
+
+    #[test]
+    fn uncertain_reattachment_reuses_the_first_monotonic_deadline() {
+        let now = Instant::now();
+        let mut deadlines = BTreeMap::new();
+        let first = ExternalWatch::recover(
+            external_test_launch(),
+            external_test_handle(),
+            Some(Vec::new()),
+            18_000_000,
+            20_000_000,
+            now,
+            &mut deadlines,
+        );
+        let reattached = ExternalWatch::recover(
+            external_test_launch(),
+            external_test_handle(),
+            Some(Vec::new()),
+            18_000_000,
+            -86_400_000_000,
+            now + Duration::from_secs(2),
+            &mut deadlines,
+        );
+        assert_eq!(first.deadline, Some(now + Duration::from_secs(3)));
+        assert_eq!(
+            reattached.deadline, first.deadline,
+            "a backward UTC step reset the remaining runtime on reattachment"
+        );
+    }
+
+    #[test]
+    fn future_recovered_utc_start_cannot_extend_the_execution_budget() {
+        let mut manifest = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
+        manifest.kind = "OneShotJob".into();
+        manifest.spec.timeout_seconds = 1;
+        let launch = Launch {
+            attempt_id: "attempt".into(),
+            execution_id: "execution".into(),
+            launch_nonce: "nonce".into(),
+            due_at_us: 0,
+            manifest,
+        };
+        let handle = crate::external::ExternalHandle::Systemd {
+            unit: "worker.service".into(),
+            since_us: Some(1),
+        };
+        let now = Instant::now();
+        let mut watch = ExternalWatch::recover(
+            launch,
+            handle,
+            Some(Vec::new()),
+            86_401_000_000,
+            1_000_000,
+            now,
+            &mut BTreeMap::new(),
+        );
+        watch.next = now + Duration::from_secs(10);
+        let directory = tempfile::tempdir().unwrap();
+        assert!(
+            watch
+                .poll_at(false, directory.path(), now + Duration::from_millis(999))
+                .is_none()
+        );
+        assert!(!watch.stopping);
+        assert!(
+            watch
+                .poll_at(false, directory.path(), now + Duration::from_secs(1))
+                .is_none()
+        );
+        assert!(
+            watch.stopping,
+            "future durable UTC time extended a one-second in-process budget"
+        );
+    }
 
     #[test]
     fn accepts_a_full_log_response_after_json_escaping() {

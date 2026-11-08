@@ -91,9 +91,9 @@ Both role and capability must permit an action, and workload/execution access al
 
 | Action | Allowed roles | Required capability |
 | --- | --- | --- |
-| Workload reads, schedule preview, validation, status | Observe, Operator, Editor, Admin | `workload.read`; implicit for non-Observe roles |
-| Execution history, diagnostics, events | Observe, Operator, Editor, Admin | `execution.read`; implicit for non-Observe roles |
-| Captured logs | Observe, Operator, Editor, Admin | Explicit `logs.read`; HTTP also needs `execution.read` for its execution lookup (explicit for Observe) |
+| Workload reads, schedule preview, validation, status | Observe, Viewer, Operator, Editor, Admin | `workload.read`; implicit for non-Observe roles |
+| Execution history, diagnostics, events | Observe, Viewer, Operator, Editor, Admin | `execution.read`; implicit for non-Observe roles |
+| Captured logs | Observe, Viewer, Operator, Editor, Admin | Explicit `logs.read` and target namespace; HTTP also needs `execution.read` for its execution lookup (explicit for Observe) |
 | Run/pause a job or cancel its execution | Operator, Editor, Admin | `workload.run_preapproved` |
 | Service desired state/restart/pause or cancel its execution | Operator, Editor, Admin | `service.control_preapproved` |
 | Plan/apply configuration | Editor, Admin | Unscoped `workload.edit_safe_config` |

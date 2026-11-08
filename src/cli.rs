@@ -200,6 +200,10 @@ enum JobCommand {
     List {
         #[arg(long)]
         namespace: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
     },
     Run {
         id: String,
@@ -220,13 +224,32 @@ enum JobCommand {
 }
 #[derive(Subcommand)]
 enum ServiceCommand {
-    List,
-    Start { id: String },
-    Stop { id: String },
-    Restart { id: String },
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    Start {
+        id: String,
+    },
+    Stop {
+        id: String,
+    },
+    Restart {
+        id: String,
+    },
 }
 #[derive(Subcommand)]
 enum ExecutionCommand {
+    List {
+        #[arg(long)]
+        workload_id: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
     Inspect {
         id: String,
     },
@@ -262,7 +285,12 @@ enum TokenCommand {
         #[arg(long)]
         output_file: Option<PathBuf>,
     },
-    List,
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
     Revoke {
         id: String,
     },
@@ -373,13 +401,13 @@ pub fn run() -> Result<Value> {
             allowed_origin,
         } => {
             let mut settings = if let Some(path) = config {
-                let bytes = fs::read(path)
+                let file = fs::File::open(path)
                     .map_err(|_| fail("CONFIG_INVALID", "Cannot read daemon configuration"))?;
-                if bytes.len() > 65_536 {
-                    return Err(fail("CONFIG_INVALID", "Configuration exceeds 64 KiB"));
-                }
-                serde_yaml_ng::from_slice::<DaemonConfig>(&bytes)
-                    .map_err(|_| fail("CONFIG_INVALID", "Invalid daemon configuration"))?
+                let mut bytes = Vec::new();
+                file.take((cronharbor::config::MAX_CONFIG_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| fail("CONFIG_INVALID", "Cannot read daemon configuration"))?;
+                cronharbor::config::parse_yaml::<DaemonConfig>(&bytes)?
             } else {
                 DaemonConfig::default()
             };
@@ -493,20 +521,13 @@ pub fn run() -> Result<Value> {
             } => {
                 let manifests = definitions(&file)?;
                 let mut definitions = Vec::new();
-                let mut expected_revisions = Vec::new();
                 for manifest in &manifests {
-                    let definition = manifest.canonical()?.0;
-                    let plan = call(AppCommand::Plan {
-                        definition: definition.clone(),
-                    })?;
-                    expected_revisions
-                        .push(plan["current_revision"].as_str().map(ToOwned::to_owned));
-                    definitions.push(definition);
+                    definitions.push(manifest.canonical()?.0);
                 }
                 if manifests.len() == 1 {
                     call(AppCommand::Apply {
                         definition: definitions.remove(0),
-                        expected_revision: expected_revision.or(expected_revisions.remove(0)),
+                        expected_revision,
                         source_kind: "FILE".into(),
                         idempotency_key: key(idempotency_key),
                     })
@@ -518,8 +539,8 @@ pub fn run() -> Result<Value> {
                         ));
                     }
                     call(AppCommand::ApplyBatch {
+                        expected_revisions: vec![None; definitions.len()],
                         definitions,
-                        expected_revisions,
                         source_kind: "FILE".into(),
                         idempotency_key: key(idempotency_key),
                     })
@@ -527,10 +548,15 @@ pub fn run() -> Result<Value> {
             }
         },
         Command::Jobs { command } => match command {
-            JobCommand::List { namespace } => call(AppCommand::Workloads {
+            JobCommand::List {
                 namespace,
-                cursor: None,
-                limit: 100,
+                cursor,
+                limit,
+            } => call(AppCommand::Workloads {
+                namespace,
+                kind: None,
+                cursor,
+                limit,
             }),
             JobCommand::Run {
                 id,
@@ -552,25 +578,18 @@ pub fn run() -> Result<Value> {
             }),
         },
         Command::Services { command } => match command {
-            ServiceCommand::List => {
-                let mut page = call(AppCommand::Workloads {
-                    namespace: None,
-                    cursor: None,
-                    limit: 100,
-                })?;
-                if let Some(items) = page["items"].as_array_mut() {
-                    items.retain(|item| {
-                        item["kind"] == "Service" || item["kind"] == "managed_service"
-                    });
-                }
-                Ok(page)
-            }
+            ServiceCommand::List { cursor, limit } => call(AppCommand::Workloads {
+                namespace: None,
+                kind: Some("managed_service".into()),
+                cursor,
+                limit,
+            }),
             other => {
                 let (id, state) = match other {
                     ServiceCommand::Start { id } => (id, Some("RUNNING")),
                     ServiceCommand::Stop { id } => (id, Some("STOPPED")),
                     ServiceCommand::Restart { id } => (id, None),
-                    ServiceCommand::List => {
+                    ServiceCommand::List { .. } => {
                         return Err(fail("INPUT_INVALID", "Invalid service command"));
                     }
                 };
@@ -596,6 +615,15 @@ pub fn run() -> Result<Value> {
             }
         },
         Command::Executions { command } => match command {
+            Some(ExecutionCommand::List {
+                workload_id,
+                cursor,
+                limit,
+            }) => call(AppCommand::Executions {
+                workload_id,
+                cursor,
+                limit,
+            }),
             None => {
                 let page = call(AppCommand::Executions {
                     workload_id: None,
@@ -703,10 +731,7 @@ pub fn run() -> Result<Value> {
             Ok(json!({"stopped":true}))
         }
         Command::Tokens { command } => match command {
-            TokenCommand::List => call(AppCommand::Tokens {
-                cursor: None,
-                limit: 100,
-            }),
+            TokenCommand::List { cursor, limit } => call(AppCommand::Tokens { cursor, limit }),
             TokenCommand::Revoke { id } => call(AppCommand::RevokeToken { id }),
             TokenCommand::Create {
                 role,

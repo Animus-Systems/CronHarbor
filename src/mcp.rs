@@ -181,6 +181,7 @@ impl Observer {
                 optional(&b.cursor, 512)?;
                 AppCommand::Workloads {
                     namespace: b.namespace,
+                    kind: None,
                     cursor: b.cursor,
                     limit: limit(b.limit)?,
                 }

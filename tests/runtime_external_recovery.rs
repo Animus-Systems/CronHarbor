@@ -61,6 +61,13 @@ fn recovered_logs(original_context: bool, lost_log_inspection: bool) {
     store
         .start_requested(&launch.attempt_id, cronharbor::now_us())
         .unwrap();
+    store
+        .running_handle(
+            &launch,
+            &serde_json::to_string(&handle).unwrap(),
+            cronharbor::now_us(),
+        )
+        .unwrap();
     let ExternalHandle::Docker { labels, .. } = &handle else {
         unreachable!()
     };
@@ -517,4 +524,114 @@ fn shutdown_waits_for_an_inflight_external_stop_and_persists_its_result() {
 #[test]
 fn shutdown_honors_durable_cancel_while_external_observation_is_inflight() {
     shutdown_external_stop(true)
+}
+
+#[test]
+fn verified_running_external_recovery_completes_matching_service_start_and_restart() {
+    for restart in [false, true] {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let state = root.path().join("state");
+        let mut store = Store::open(&state).unwrap();
+        let mut manifest = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
+        manifest.kind = "Service".into();
+        manifest.spec.execution.adapter = "docker".into();
+        manifest.spec.service.desired_state = "STOPPED".into();
+        let image = format!("fixture@sha256:{}", "a".repeat(64));
+        manifest.spec.execution.docker = Some(DockerSpec {
+            image: image.clone(),
+            user: "10001".into(),
+            network: "none".into(),
+            memory_bytes: 8 * 1024 * 1024,
+            pids_limit: 8,
+        });
+        store.apply(&manifest, cronharbor::now_us()).unwrap();
+        let command = if restart {
+            AppCommand::ServiceRestart {
+                id: "local/hello".into(),
+                expected_revision: None,
+                idempotency_key: "recovered-ready".into(),
+            }
+        } else {
+            AppCommand::ServiceDesired {
+                id: "local/hello".into(),
+                desired_state: "RUNNING".into(),
+                expected_revision: None,
+                idempotency_key: "recovered-ready".into(),
+            }
+        };
+        let operation = application::execute(&mut store, command, None).unwrap();
+        let launch = store.claim_due(cronharbor::now_us()).unwrap().unwrap();
+        store
+            .start_requested(&launch.attempt_id, cronharbor::now_us())
+            .unwrap();
+        let handle =
+            cronharbor::external::docker_handle(&store.external_identity(&launch).unwrap());
+        store
+            .running_handle(
+                &launch,
+                &serde_json::to_string(&handle).unwrap(),
+                cronharbor::now_us(),
+            )
+            .unwrap();
+        let ExternalHandle::Docker { labels, .. } = &handle else {
+            unreachable!()
+        };
+        let helper = root.path().join("docker-fixture");
+        let object = serde_json::json!([{"Config":{"Labels":labels,"Env":[]},"State":{"Running":true,"Status":"running","ExitCode":0}}]);
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ncase \"$3\" in\ninspect) printf '%s\\n' '{}' ;;\n*) exit 1 ;;\nesac\n",
+                object
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = ExecutorPolicy {
+            docker_enabled: true,
+            docker_binary: helper.to_string_lossy().into_owned(),
+            images: vec![image],
+            ..ExecutorPolicy::default()
+        };
+        fs::write(
+            state.join("executors.json"),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(
+            state.join("executors.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        drop(store);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let directory = state.clone();
+        let daemon = thread::spawn(move || server::run_with_shutdown(&directory, &[], false, flag));
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut result = None;
+        while Instant::now() < deadline {
+            if let Ok(value) = server::client(
+                &state,
+                Request::Execute {
+                    command: Box::new(AppCommand::Operation {
+                        id: operation["id"].as_str().unwrap().into(),
+                    }),
+                    token: None,
+                },
+            ) {
+                let done = value["state"] == "SUCCEEDED";
+                result = Some(value);
+                if done {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        shutdown.store(true, Ordering::Relaxed);
+        daemon.join().unwrap().unwrap();
+        let result = result.unwrap();
+        assert_eq!(result["state"], "SUCCEEDED", "restart={restart}");
+        assert!(result["error_code"].is_null());
+    }
 }

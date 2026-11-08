@@ -280,13 +280,7 @@ pub fn start_docker(
         use std::io::Write;
         let mut file = crate::store::secure_file(&env_path)?;
         for (key, value) in env {
-            if key.is_empty()
-                || !key
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-                || key.as_bytes()[0].is_ascii_digit()
-                || value.contains(['\n', '\r', '\0'])
-            {
+            if !crate::config::env_name(key) || value.contains(['\n', '\r', '\0']) {
                 let _ = fs::remove_file(&env_path);
                 return Err(Error::new(
                     "CONFIG_INVALID",

@@ -411,6 +411,8 @@ pub enum AppCommand {
     Status,
     Workloads {
         namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
         cursor: Option<String>,
         limit: u32,
     },

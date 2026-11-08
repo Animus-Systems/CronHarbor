@@ -999,6 +999,7 @@ async fn dispatch(
             let q = list(&request, "workloads")?;
             AppCommand::Workloads {
                 namespace: q.namespace,
+                kind: None,
                 cursor: q.cursor,
                 limit: q.limit.unwrap_or(50),
             }

@@ -10,8 +10,9 @@ fn fixture() -> (tempfile::TempDir, Store) {
 
 #[test]
 fn rotation_is_explicit_and_requires_two_complete_segments() {
-    let mut value: serde_json::Value =
-        serde_yaml_ng::from_str(include_str!("../examples/hello.yaml")).unwrap();
+    let mut value =
+        serde_json::to_value(Manifest::parse(include_str!("../examples/hello.yaml")).unwrap())
+            .unwrap();
     assert!(
         Manifest::parse(&serde_json::to_string(&value).unwrap())
             .unwrap()

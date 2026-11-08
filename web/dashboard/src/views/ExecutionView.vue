@@ -130,7 +130,7 @@ async function load(forceDiagnostic = false): Promise<void> {
   }
 }
 watch(
-  () => d.lastRefresh.value,
+  () => d.snapshotGeneration.value,
   () => { void load(); },
 );
 watch(

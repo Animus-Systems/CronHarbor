@@ -69,12 +69,19 @@ const impact = computed(() =>
 );
 let stopped = false;
 let detailRefreshing = false;
+let detailQueued = false;
 async function load(): Promise<void> {
   const current = d.api.value;
-  if (stopped || detailRefreshing || !d.connected.value || !current) return;
+  if (stopped || !d.connected.value || !current) return;
+  if (detailRefreshing) {
+    detailQueued = true;
+    return;
+  }
   const path = route.path;
-  const ownsRequest = () =>
-    !stopped && d.api.value === current && route.path === path;
+  const snapshot = d.snapshotGeneration.value;
+  const ownsContext = () =>
+    !stopped && d.connected.value && d.api.value === current && route.path === path;
+  const ownsRequest = () => ownsContext() && d.snapshotGeneration.value === snapshot;
   detailRefreshing = true;
   try {
     const result = await current.get(
@@ -123,6 +130,10 @@ async function load(): Promise<void> {
   } finally {
     if (ownsRequest()) loading.value = false;
     detailRefreshing = false;
+    if (detailQueued) {
+      detailQueued = false;
+      if (ownsContext()) void load();
+    }
   }
 }
 onMounted(() => {
@@ -132,7 +143,7 @@ onBeforeUnmount(() => {
   stopped = true;
 });
 watch(
-  () => d.lastRefresh.value,
+  () => d.snapshotGeneration.value,
   () => {
     void load();
   },

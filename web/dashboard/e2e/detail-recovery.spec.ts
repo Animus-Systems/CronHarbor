@@ -261,6 +261,75 @@ test("workload detail recovers after a transient failure on refresh", async ({ p
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
+test("workload detail coalesces refreshes received while its older revision is in flight", async ({ page }) => {
+  await page.addInitScript(() => { Date.now = () => 1800000000000; });
+  let release: (() => void) | undefined;
+  let detailReads = 0;
+  let latest = workload;
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
+    if (path === "/events") return;
+    if (path === `/workloads/${workload.id}`) {
+      const selected = latest;
+      if (++detailReads === 1) await new Promise<void>((resolve) => { release = resolve; });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(selected) });
+      return;
+    }
+    const value = path === "/session" ? principal
+      : path === "/status" ? status
+        : path === "/workloads" ? { items: [latest], next_cursor: null }
+          : { items: [], next_cursor: null };
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(value) });
+  });
+  await connect(page, `/#/jobs/${workload.id}`);
+  await expect.poll(() => detailReads).toBe(1);
+  latest = { ...workload, revision_id: "revision_2" };
+  for (let index = 0; index < 3; index++) {
+    const snapshot = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/workloads");
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    expect(await (await snapshot).json()).toEqual({ items: [latest], next_cursor: null });
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+  }
+  expect(detailReads).toBe(1);
+  const oldResponse = page.waitForResponse((response) => response.url().endsWith(`/workloads/${workload.id}`));
+  release?.();
+  await (await oldResponse).finished();
+  await expect(page.locator('dd[title="revision_2"]')).toBeVisible();
+  expect(detailReads).toBe(2);
+  await expect(page.locator('dd[title="revision_1"]')).toHaveCount(0);
+});
+
+test("a queued workload refresh is discarded after leaving the detail route", async ({ page }) => {
+  let release: (() => void) | undefined;
+  let detailReads = 0;
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
+    if (path === "/events") return;
+    if (path === `/workloads/${workload.id}`) {
+      detailReads++;
+      await new Promise<void>((resolve) => { release = resolve; });
+    }
+    const value = path === "/session" ? principal
+      : path === "/status" ? status
+        : path === `/workloads/${workload.id}` ? workload
+          : path === "/workloads" ? { items: [workload], next_cursor: null }
+            : { items: [], next_cursor: null };
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(value) });
+  });
+  await connect(page, `/#/jobs/${workload.id}`);
+  await expect.poll(() => detailReads).toBe(1);
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+  await page.getByRole("link", { name: "Jobs", exact: true }).click();
+  await expect(page).toHaveURL(/#\/jobs$/);
+  const oldResponse = page.waitForResponse((response) => response.url().endsWith(`/workloads/${workload.id}`));
+  release?.();
+  await (await oldResponse).finished();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  expect(detailReads).toBe(1);
+  await expect(page.getByRole("heading", { name: "Jobs.", exact: true })).toBeVisible();
+});
+
 test("a delayed operation lookup cannot replace a later route or populate its operations", async ({ page }) => {
   let release: (() => void) | undefined;
   let blocked = false;

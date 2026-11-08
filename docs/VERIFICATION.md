@@ -1,10 +1,62 @@
 # Implementation verification record
 
-Recorded on 2026-11-07. These results describe the local source and disposable fixtures. They do not certify a production installation or replace the remaining release gates.
+Dated entries distinguish current verification from historical runs. These results describe the local source and disposable fixtures. They do not certify a production installation or replace the remaining release gates.
+
+## Version 0.11.0 — 2026-11-08
+
+The Rust package, dashboard package, both lockfiles and README now identify version `0.11.0`. This release includes the review repairs below and the preceding logs/webhooks feature commit. The version bump changes no dependency versions, workload API version or applied migration; the installation remains at schema 5, including the feature commit's migrations 4 and 5.
+
+Fresh pre-commit checks on macOS passed: 284 Rust tests with all features/targets, Clippy with warnings denied, formatting, eight repository checks, dashboard typecheck/75 tests/build, Full build and `cronharbor --version` reporting `0.11.0`. Type/schema exports remained byte-identical. Full browser acceptance passed 31 scenarios plus the separate-origin scenario (32 total), including real REST/MCP/backup/restore journeys.
+
+The Linux, Docker, HTTPS and dedicated 65-second rotation/freeze evidence in the review-repair section predates this metadata-only version bump. Those images were not rebuilt or published as `0.11.0`; live systemd/Grokbot and production-load gates remain unexecuted. Earlier records retain their then-current Git state and evidence.
+
+## Review repairs — 2026-11-08
+
+This pass repairs the findings against `ba42da2`, including equivalent scheduled-admission and external-terminal recovery paths identified during the fix review. It changes no applied migration. Migrations 1–5 were compared with that commit and are byte-identical. Runtime checks used private disposable state, receivers, credentials and the explicitly selected test Docker daemon.
+
+| Area | Repaired behavior and maintained regression evidence |
+|---|---|
+| Executor authority | Cancel checks the immutable execution revision; service controls and revision-changing apply/batches check every affected active/UNKNOWN adapter. Denied changes remain atomic (`backend_review`) |
+| Queue admission | Manual and scheduled candidates apply pinned-revision capacity eligibility before their limits. Scheduled expiry/forbid cleanup remains bounded and preserves inclusive 60-second grace and reason precedence (`backend_review`, `core`, `runtime_schedule`) |
+| Recovery and operations | Verified reattachment permits an empty, error-free external snapshot to capture fresh redacted terminal output. Retained native/external evidence stays protected. Reconciliation and verified external termination resolve applicable Run/Cancel/STOP/START/RESTART operations without reviving superseded intent (`backend_review`, `runtime_external_recovery`) |
+| Configuration | One budgeted YAML boundary limits raw/expanded scalars, depth, nodes, anchors and replay; strict semantic types and string keys reach the canonical Rust model. Alias amplification, coercion, duplicate/tag/key-normalization bypasses, canonical 65,536-byte dispatch and both secret-reference forms are covered (`config_parser`, `core`) |
+| Executor correctness | Docker reuses canonical lowercase-capable environment-name validation; importer comments remain unsupported. External deadlines use monotonic time across pending start and in-owner UNKNOWN reattachment, with bounded deadline bookkeeping (`external`, `importer`, server unit tests) |
+| Owner lifetime | Graceful close explicitly unlocks after SQLite closes, including when a child retains the file description. A deterministic inherited-descriptor test replaces the previously intermittent failure mechanism; forced termination still does not execute destructors (store unit test) |
+| CLI | Local FILE apply preserves original command identity; explicit revisions retain CAS. Bounded cursor options expose inventories, services filter before LIMIT, and new `executions list` preserves page metadata while bare `executions` stays an array (`cli`, `runtime_application`, `api`, `mcp`) |
+| Dashboard | Both lists reject stale responses/errors and duplicate owned page requests; workload detail coalesces invalidations. A reactive snapshot counter provides notifications while displayed refresh time remains actual wall time. HTTP 408 keeps the immutable intent for explicit retry (`store.test.ts`, `detail-recovery.spec.ts`) |
+| Documentation | Corrected startup pause reapplication, alert destination identity/retirement/retry eligibility, Viewer read roles, Settings retention controls, browser fixture prerequisites and historical verification claims |
+
+Root independently executed the following against the repaired source:
+
+| Check | Result |
+|---|---|
+| macOS arm64 Rust | `cargo test --locked --all-features --all-targets`: **284 passed**, zero failed/ignored; 31 test binaries including the empty main harness |
+| Linux aarch64 Rust | Actual Dockerfile `checks` target: the same **284 tests** and all-feature/all-target Clippy with warnings denied passed. An initial linker ENOSPC in the disposable VM was followed by a clean target-cache rebuild; no test or compiler setting was weakened |
+| Formatting/static checks | `cargo fmt --all --check`, root all-feature/all-target Clippy with `-D warnings`, eight repository checks, migration comparison and diff whitespace checks passed |
+| Contracts | Fresh Full `export-types` and `export-schema` succeeded; both generated files were byte-identical to the committed artifacts |
+| Dashboard | Host typecheck, all **75 unit tests** and production build passed. The pinned Node 22 Full image independently ran the same 75 tests and production build |
+| Browser and real daemon | `test_full.py --browser` passed 31 first-pass Chromium scenarios and the separate-origin scenario; `test_log_rotation.py --browser` passed the specialized owner-restart/freeze scenario: **33 distinct scenarios**. The suite combines synthetic UI failures with real API journeys. Both initially skipped specialized scenarios were executed through their dedicated fixtures |
+| Feature isolation | Fresh Core, Core+webhooks, API and Full builds passed CLI/server interface checks: Core variants expose no HTTP/MCP, API exposes HTTP without MCP, Full exposes both |
+| Real transports/executor | `test_webhooks.py` passed against final Full and Core+webhooks binaries using disposable private-CA HTTPS receivers. `test_docker_executor.py` passed against the explicitly selected disposable daemon and pinned Alpine image, including terminal logs/cleanup and outage UNKNOWN without replay |
+| Dependency state | Public npm lockfile audit: 130 entries, zero known vulnerabilities. OSV batch query: 278 Rust registry packages, no findings. `serde_yaml_ng` and `unsafe-libyaml` are absent; the new parser enables only deserialization. This dependency result is separate from scoped source review |
+
+Fresh local Linux aarch64 Core/API/Full images built successfully. Core smoke passed nonroot/read-only/no-TCP operation, second-owner denial, scheduled output, bounded logs and restart uniqueness. Full smoke passed packaged UI, bearer bootstrap/status and packaged Docker client without a socket mount. The API smoke passed loopback health, bearer enforcement, authenticated status, disabled unconfigured alerts and HTTP-without-MCP isolation. The Core smoke used a disposable Compose image override; existing development-image tags were preserved.
+
+- Core: `sha256:3706801494c4f1ee0dde4f5050168e9dd42186cf0bc9e5af544e7fa6341a876d`.
+- API: `sha256:84307977829f2cf19330367cd59ea8cbadfdfd8d218686e624d46216306ac50a`.
+- Full: `sha256:e89ce74854e09f2aacf8b14591ab41a548d5e6321611469790d09473a52bc758`.
+
+The same 20,639-byte alias fixture returned a late generic schema error with 29,835,264-byte maximum RSS before the parser change, then a parsing-budget error with 13,254,656-byte maximum RSS afterward, measured with `/usr/bin/time -l` on this macOS host. This is one bounded diagnostic fixture, not a production resource or throughput guarantee. Fresh source compliance/quality reviews covered each bundle; a separate security bypass review found the additional scheduled and terminal-recovery cases above, which were reproduced before repair.
+
+Source-format tightening is deliberate: quote numeric/boolean/null-looking text and mapping keys, use explicit empty collections, and remove duplicate keys or unsupported custom YAML tags before upgrade. Persisted canonical JSON remains compatible. Earlier CLI update keys can contain an implicitly planned revision; the CLI cannot infer that old request. An original explicit revision permits single-file recovery; do not substitute a new key for an uncertain intent merely to avoid a conflict.
+
+Live application API/Grokbot processing, host systemd integration, production migration/load, x86_64 and physical disk/OOM/power-loss drills remain unexecuted. Execution rows still accumulate through manual pagination in the existing nonvirtualized table; this repair does not establish a global execution-DOM limit or a large-history performance result. No commit, push, deployment or publication is part of this pass.
+
+The 31 intended files were transferred byte-for-byte to the normal checkout on `main`, with no conflicting user edits. Full build, dashboard typecheck/75 tests/build, formatting, repository checks and diff checks passed there. Disposable containers/volumes and test daemons/Vite processes were gone; port 5186 was clear. The dedicated Colima `cronharbor` profile was restored to Stopped and the global Docker context remained `desktop-linux`.
 
 ## Log controls, rotation and outbound alerts — 2026-11-07–08
 
-The current change adds one installation log policy, opt-in native segment rotation and a durable HTTPS alert sender. It adds migrations 4 and 5; migrations 1–3 were compared byte-for-byte with the base commit and are unchanged. Configuration and receiver responsibilities are in [RUNBOOK.md](RUNBOOK.md) and [the webhook contract](api/WEBHOOKS.md). No production state, endpoint or credential was used.
+This earlier feature baseline added one installation log policy, opt-in native segment rotation and a durable HTTPS alert sender. It added migrations 4 and 5; migrations 1–3 were compared byte-for-byte with its base commit and were unchanged. Configuration and receiver responsibilities are in [RUNBOOK.md](RUNBOOK.md) and [the webhook contract](api/WEBHOOKS.md). No production state, endpoint or credential was used. Its counts and image IDs below remain historical; the review-repair record above supersedes them for the current source.
 
 | Check | Executed evidence |
 |---|---|

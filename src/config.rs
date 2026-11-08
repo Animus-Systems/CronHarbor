@@ -298,6 +298,150 @@ fn threshold() -> u32 {
 fn invalid(message: &'static str) -> Error {
     Error::new("CONFIG_INVALID", message)
 }
+struct StrictConfigValue(serde_json::Value);
+struct ConfigValueVisitor;
+impl<'de> Deserialize<'de> for StrictConfigValue {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_any(ConfigValueVisitor)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for ConfigValueVisitor {
+    type Value = StrictConfigValue;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON-compatible configuration value")
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+        Ok(StrictConfigValue(serde_json::Value::Null))
+    }
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(StrictConfigValue(value.into()))
+    }
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictConfigValue(value.into()))
+    }
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictConfigValue(value.into()))
+    }
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> std::result::Result<Self::Value, E> {
+        serde_json::Number::from_f64(value)
+            .map(|number| StrictConfigValue(serde_json::Value::Number(number)))
+            .ok_or_else(|| E::custom("Non-finite configuration numbers are unsupported"))
+    }
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        self.visit_string(value.to_owned())
+    }
+    fn visit_string<E: serde::de::Error>(
+        self,
+        value: String,
+    ) -> std::result::Result<Self::Value, E> {
+        Ok(StrictConfigValue(value.into()))
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(StrictConfigValue(value)) = sequence.next_element()? {
+            values.push(value);
+        }
+        Ok(StrictConfigValue(serde_json::Value::Array(values)))
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut mapping: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some(ConfigStringKey(key)) = mapping.next_key()? {
+            if values.contains_key(&key) {
+                return Err(serde::de::Error::custom("Duplicate configuration key"));
+            }
+            let StrictConfigValue(value) = mapping.next_value()?;
+            values.insert(key, value);
+        }
+        Ok(StrictConfigValue(serde_json::Value::Object(values)))
+    }
+}
+struct ConfigStringKey(String);
+struct ConfigKeyVisitor;
+impl<'de> Deserialize<'de> for ConfigStringKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_any(ConfigKeyVisitor).map(Self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for ConfigKeyVisitor {
+    type Value = String;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a string configuration key")
+    }
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(value.to_owned())
+    }
+    fn visit_string<E: serde::de::Error>(
+        self,
+        value: String,
+    ) -> std::result::Result<Self::Value, E> {
+        Ok(value)
+    }
+}
+pub fn parse_yaml<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(invalid("Configuration exceeds 64 KiB"));
+    }
+    let options = serde_saphyr::options! {
+        budget: serde_saphyr::budget! {
+            max_events: 2 * MAX_CONFIG_BYTES,
+            max_nodes: MAX_CONFIG_BYTES,
+            max_total_scalar_bytes: MAX_CONFIG_BYTES,
+            max_recorded_anchor_events: MAX_CONFIG_BYTES,
+            max_recorded_anchor_bytes: MAX_CONFIG_BYTES,
+            max_depth: 64,
+            flow_nesting_limit: 64,
+            max_documents: 1,
+            max_aliases: MAX_CONFIG_BYTES,
+            max_anchors: MAX_CONFIG_BYTES,
+            enforce_alias_anchor_ratio: false,
+        },
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 2 * MAX_CONFIG_BYTES,
+            max_replay_stack_depth: 64,
+            max_alias_expansions_per_anchor: MAX_CONFIG_BYTES,
+        },
+        strict_booleans: true,
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::Reject,
+        reject_unsupported_tags: true,
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+        leading_zero_numbers_as_strings: true,
+        underscored_numbers_as_strings: true,
+        with_snippet: false,
+    };
+    // Direct typed YAML deserialization coerces quoted numbers and booleans.
+    let StrictConfigValue(value) =
+        serde_saphyr::from_slice_with_options(bytes, options).map_err(|error| {
+            let mut cause = &error;
+            while let serde_saphyr::Error::AliasError { error, .. }
+            | serde_saphyr::Error::WithSnippet { error, .. } = cause
+            {
+                cause = error;
+            }
+            match cause {
+                serde_saphyr::Error::Budget { .. }
+                | serde_saphyr::Error::AliasReplayCounterOverflow { .. }
+                | serde_saphyr::Error::AliasReplayLimitExceeded { .. }
+                | serde_saphyr::Error::AliasExpansionLimitExceeded { .. }
+                | serde_saphyr::Error::AliasReplayStackDepthExceeded { .. } => {
+                    invalid("Configuration exceeds YAML parsing limits")
+                }
+                _ => invalid("Configuration does not match the supported schema"),
+            }
+        })?;
+    serde_json::from_value(value)
+        .map_err(|_| invalid("Configuration does not match the supported schema"))
+}
 pub fn env_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -326,8 +470,7 @@ impl Manifest {
         if text.len() > MAX_CONFIG_BYTES {
             return Err(invalid("Manifest exceeds 64 KiB"));
         }
-        let mut value: Self = serde_yaml_ng::from_str(text)
-            .map_err(|_| invalid("Manifest does not match the supported schema"))?;
+        let mut value: Self = parse_yaml(text.as_bytes())?;
         if let Some(restart) = value.spec.restart.take() {
             value.spec.service.restart = restart.policy;
             value.spec.service.max_restarts = restart.max_attempts;

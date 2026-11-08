@@ -47,7 +47,7 @@ uiDirectory: /usr/share/cronharbor/ui
 allowedOrigins: []
 ```
 
-Build/install an API or Full binary for `listen` and `uiDirectory`; for Core, omit those fields and `allowedOrigins`. Install the built dashboard at the selected UI path. Keep configuration and manifests controlled by the operator and readable by the service user; keep secrets and executor policy private to that user. State must be owned by `cronharbor` with mode 0700. The supplied unit creates its state directory but does not install the user, binary, definitions or UI assets. Start paused, inspect plans and status, then explicitly resume after review. Use the same service UID and `--state-dir` for trusted local administration.
+Build/install an API or Full binary for `listen` and `uiDirectory`; for Core, omit those fields and `allowedOrigins`. Install the built dashboard at the selected UI path. Keep configuration and manifests controlled by the operator and readable by the service user; keep secrets and executor policy private to that user. State must be owned by `cronharbor` with mode 0700. The supplied unit creates its state directory but does not install the user, binary, definitions or UI assets. Start paused and inspect plans and status. `paused: true` reapplies the pause on every startup. After bootstrap review, set it to `false` or remove it before explicitly resuming if dispatch should remain enabled across restarts. Setting it to `false` does not clear an already persisted pause. Use the same service UID and `--state-dir` for trusted local administration.
 
 ## Docker profiles
 
@@ -79,9 +79,11 @@ Dockerfile targets `core`, `api`, `full` and `checks` build the respective binar
 ./target/debug/cronharbor jobs run WORKLOAD_ID --idempotency-key operator-intent-001
 ```
 
-Directory apply validates the entire batch first and commits all revisions atomically. The CLI reads current revision plans and uses compare-and-swap; supply `--expected-revision` when applying one specific reviewed revision. Requests are bounded, so an exceptionally large batch should be split into separately reviewed batches rather than bypassing the limit.
+Directory apply validates the entire batch first and commits all revisions atomically. Local FILE apply without `--expected-revision` resolves the current revision inside the daemon; supply that option when applying one specific reviewed revision with compare-and-swap. Remote API updates still require an expected revision. Repeating the same file contents, explicit revision option and idempotency key recovers the original operation without reapplying it. Older CLI updates embedded implicitly planned revisions in their requests; the new CLI cannot infer those old requests. An old single-file update needs its original expected revision explicitly to replay. Requests are bounded, so an exceptionally large batch should be split into separately reviewed batches rather than bypassing the limit.
 
 File-owned definitions remain read-only through the dashboard/API; use local file apply to change them. API-created definitions must say `owner: api`. The transport cannot silently convert an existing FILE workload into an editable API workload. Lifecycle pause/run/service operations are separate authorized actions.
+
+YAML/JSON configuration is limited to 64 KiB of source and 64 KiB of expanded scalar content, with separate depth, event and anchor-storage bounds. Ordinary aliases that fit those limits remain supported. Parsed values must match the configuration schema: boolean and number fields require those types; quote text that looks like a number, boolean or `null`/`~`, including mapping keys. Use `[]` or `{}` for empty collections, and give each string mapping key only once. Implicit scalar-to-string and blank-to-collection coercions, duplicate mapping keys and application-specific YAML tags accepted by the previous parser are rejected. Standard YAML tags remain subject to schema validation. Persisted canonical JSON uses explicit types and unique keys and remains readable. Validate reviewed workload files with `config validate -f PATH` before upgrading; correct the same source-format issues in daemon configuration.
 
 Scheduled jobs support five numeric cron fields, IANA time zones, explicit DST fold/gap selection, anchored intervals, bounded skip/latest/catch-up, allow/forbid concurrency and explicit safe-retry policy. One-shot jobs run only on manual request. No implicit shell is added; commands and argv are separate. Retries default to one attempt. UNKNOWN effects never automatically retry, even under an idempotent retry policy.
 
@@ -95,11 +97,14 @@ Cancelling during retry backoff removes the pending retry and cancels the execut
 ./target/debug/cronharbor services restart WORKLOAD_ID
 ./target/debug/cronharbor services stop WORKLOAD_ID
 ./target/debug/cronharbor executions
+./target/debug/cronharbor executions list --workload-id WORKLOAD_ID --limit 25
 ./target/debug/cronharbor executions inspect EXECUTION_ID
 ./target/debug/cronharbor executions diagnostics EXECUTION_ID
 ./target/debug/cronharbor logs ATTEMPT_ID --follow --max-bytes 65536
 ./target/debug/cronharbor operations inspect OPERATION_ID
 ```
+
+`jobs list`, `services list` and `tokens list` accept `--limit` and `--cursor` and return `items` plus `next_cursor`. Service filtering happens before the page limit. Use a returned cursor with the same filters to request the next page. Bare `executions` preserves its bounded array output for existing scripts; `executions list` returns the page envelope and accepts `--limit`, `--cursor` and optional `--workload-id`. The default page size is 100; no command silently scans an unbounded inventory.
 
 Services distinguish desired RUNNING/STOPPED from observed startup/readiness/liveness/failure states. Explicit executable probes have deadlines and thresholds, with recent observations queryable. Automatic restart has a bounded window and backoff; operator restart is a separate authorized intent. Accepted operations are not completion evidence. Conflicting controls supersede earlier operations explicitly.
 
@@ -176,7 +181,7 @@ Use API, Full, or a Core build with `--features webhooks`. An absent `alerts` bl
 
 Provision an HTTPS receiver and a separate ingestion-only credential first. The token is 1–512 visible ASCII bytes, from an environment reference or owned private regular file (0600, no symlink/hard link). File credentials may end with one LF or CRLF. It is resolved per request so file rotation does not change destination identity. An optional CA file supplies internal trust and is limited to 1 MiB; hostname verification remains enabled. Container/native service users need explicit access to these deployment resources.
 
-Public unicast destinations are allowed. Private RFC1918/ULA and loopback addresses require exact entries in `allowedPrivateAddresses` (at most 16); link-local, unspecified, multicast, broadcast and mapped-address bypasses are rejected. The sender validates at most 16 DNS answers and pins the approved set to each HTTPS request. Ambient proxy configuration and redirects cannot change its destination. An endpoint change retires old outstanding deliveries; they are not redirected to the new API.
+Public unicast destinations are allowed. Private RFC1918/ULA and loopback addresses require exact entries in `allowedPrivateAddresses` (at most 16); link-local, unspecified, multicast, broadcast and mapped-address bypasses are rejected. The sender validates at most 16 DNS answers and pins the approved set to each HTTPS request. Ambient proxy configuration and redirects cannot change its destination. Destination identity includes the normalized endpoint and sorted `allowedPrivateAddresses`. Changing either retires old outstanding deliveries as `DESTINATION_CHANGED`, even when the endpoint stays the same; they are not redirected. Rotating credentials or the trusted CA does not change this identity.
 
 ```sh
 ./target/debug/cronharbor alerts status
@@ -184,7 +189,7 @@ Public unicast destinations are allowed. Private RFC1918/ULA and loopback addres
 ./target/debug/cronharbor alerts retry ALERT_ID --idempotency-key reviewed-alert-retry-1
 ```
 
-Status/list/retry require installation-wide Admin authority (`operations.manage` and wildcard namespaces) or the trusted local owner. The dashboard Settings panel uses the same backend rules. A retry is one additional send with the original ID and body, not a workload restart or a new automatic retry cycle. Polling never resubmits it. Blocked credentials/TLS/destination require repair and explicit retry; HTTP redirects are failures. No resolved credential, raw receiver body or log excerpt enters delivery history.
+Status/list/retry require installation-wide Admin authority (`operations.manage` and wildcard namespaces) or the trusted local owner. The dashboard Settings panel uses the same backend rules. A retry is one additional send with the original ID and body, not a workload restart or a new automatic retry cycle. Only eligible `FAILED`, `BLOCKED` or `EXPIRED` rows whose destination still matches the current configuration can be retried. `DESTINATION_CHANGED` rows cannot be retried. Polling never resubmits it. Blocked credentials/TLS/destination require repair and explicit retry; HTTP redirects are failures. No resolved credential, raw receiver body or log excerpt enters delivery history.
 
 The queue holds at most 1,000 outstanding alerts, each at most 8,192 bytes. Overflow is visibly suppressed, not delivered. Automatic attempts are bounded to 12 within 24 hours; terminal history is bounded to 1,000 rows and seven days. These limits exclude SQLite/WAL and backup file sizes. A slow or stuck resolver makes delivery unavailable without blocking scheduling or spawning replacements indefinitely.
 

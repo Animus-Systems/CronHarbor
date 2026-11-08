@@ -224,7 +224,7 @@ fn simple_argv(script: &str) -> Option<(String, Vec<String>)> {
     if script.len() > 16_384
         || script
             .chars()
-            .any(|c| c.is_control() || "'\"`$;&|<>\\(){}*?[]~".contains(c))
+            .any(|c| c.is_control() || "'\"`$;&|<>\\(){}*?[]~#".contains(c))
     {
         return None;
     }

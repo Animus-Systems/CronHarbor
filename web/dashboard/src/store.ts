@@ -36,6 +36,7 @@ const error = ref("");
 const connectionError = ref("");
 const notice = ref("");
 const lastRefresh = ref<number | null>(null);
+const snapshotGeneration = ref(0);
 const refreshing = ref(false);
 const pending = ref(false);
 interface Intent {
@@ -50,6 +51,10 @@ let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let sessionGeneration = 0;
 let recoveryAttempt = 0;
 let refreshTask: Promise<void> | null = null;
+const pageRequests: Record<"workloads" | "executions", symbol | null> = {
+  workloads: null,
+  executions: null,
+};
 const canAct = computed(
   () => connected.value && !pending.value && !uncertain.value,
 );
@@ -87,6 +92,9 @@ async function refreshSnapshot(): Promise<void> {
         : Promise.resolve({ items: [], next_cursor: null }),
     ]);
     if (api.value !== current) return;
+    snapshotGeneration.value++;
+    pageRequests.workloads = null;
+    pageRequests.executions = null;
     status.value = nextStatus;
     workloads.value = nextWorkloads.items;
     executions.value = nextExecutions.items;
@@ -113,31 +121,43 @@ async function refreshSnapshot(): Promise<void> {
 }
 async function loadMore(kind: "workloads" | "executions"): Promise<void> {
   const current = api.value;
-  if (!current) return;
-  const cursor =
-    kind === "workloads" ? workloadCursor.value : executionCursor.value;
+  if (!current || !connected.value || pageRequests[kind]) return;
+  const generation = snapshotGeneration.value;
+  const nextCursor =
+    kind === "workloads" ? workloadCursor : executionCursor;
+  const cursor = nextCursor.value;
   if (!cursor) return;
+  const request = Symbol();
+  pageRequests[kind] = request;
+  const ownsRequest = () =>
+    api.value === current &&
+    connected.value &&
+    snapshotGeneration.value === generation &&
+    pageRequests[kind] === request &&
+    nextCursor.value === cursor;
   try {
     if (kind === "workloads") {
-      const result = await client().get(
+      const result = await current.get(
         `/workloads?limit=100&cursor=${encodeURIComponent(cursor)}`,
         pageOf(isWorkload),
       );
-      if (api.value !== current) return;
+      if (!ownsRequest()) return;
       workloads.value = [...workloads.value, ...result.items];
       workloadCursor.value = result.next_cursor;
     } else {
-      const result = await client().get(
+      const result = await current.get(
         `/executions?limit=100&cursor=${encodeURIComponent(cursor)}`,
         pageOf(isExecution),
       );
-      if (api.value !== current) return;
+      if (!ownsRequest()) return;
       executions.value = [...executions.value, ...result.items];
       executionCursor.value = result.next_cursor;
     }
   } catch (caught) {
-    if (api.value !== current) return;
+    if (!ownsRequest()) return;
     error.value = formatError(caught);
+  } finally {
+    if (pageRequests[kind] === request) pageRequests[kind] = null;
   }
 }
 function scheduleRefresh(): void {
@@ -253,6 +273,9 @@ async function connect(base: string, token: string): Promise<void> {
 }
 function disconnect(): void {
   sessionGeneration++;
+  snapshotGeneration.value++;
+  pageRequests.workloads = null;
+  pageRequests.executions = null;
   recoveryAttempt = 0;
   refreshTask = null;
   refreshing.value = false;
@@ -269,6 +292,8 @@ function disconnect(): void {
   status.value = null;
   workloads.value = [];
   executions.value = [];
+  workloadCursor.value = null;
+  executionCursor.value = null;
   operations.value = [];
   events.value = [];
   lastRefresh.value = null;
@@ -344,6 +369,7 @@ async function submitIntent(intent: Intent): Promise<OperationDto | null> {
     if (
       caught instanceof ApiError &&
       (["NETWORK", "INVALID_RESPONSE"].includes(caught.code) ||
+        caught.status === 408 ||
         caught.status >= 500)
     ) {
       uncertain.value = intent;
@@ -407,6 +433,7 @@ export const dashboard = {
   connectionError,
   notice,
   lastRefresh,
+  snapshotGeneration,
   refreshing,
   pending,
   uncertain,

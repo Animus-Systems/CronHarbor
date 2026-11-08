@@ -27,9 +27,17 @@ pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
 ];
 pub const MAX_ACTIVE: i64 = 4;
 
+struct OwnerLock(File);
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 pub struct Store {
     pub(crate) connection: Connection,
-    _owner: File,
+    // SQLite must close before ownership is released, even when a child inherited the descriptor.
+    _owner: OwnerLock,
     pub directory: PathBuf,
     last_auth_rejection: Option<Instant>,
     pub(crate) alert_policy: crate::alerts::AlertCapturePolicy,
@@ -155,6 +163,7 @@ impl Store {
                 "Another daemon owns this state directory, or locking is unavailable",
             )
         })?;
+        let owner = OwnerLock(owner);
         match fs::symlink_metadata(directory.join("restore-installing")) {
             Ok(_) => {
                 return Err(Error::new(
@@ -504,7 +513,7 @@ impl Store {
             let s = &manifest.spec.schedule;
             tx.execute("INSERT INTO schedules(id,workload_id,revision_id,schedule_kind,expression,timezone,fold_policy,gap_policy,misfire_policy,lateness_grace_seconds,next_due_at_us,active) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,60,?10,?11)",params![id(),workload,revision,s.r#type,s.expression,s.timezone,s.fold,s.gap,s.misfire.policy,next,manifest.spec.enabled])?;
         }
-        tx.execute("UPDATE operations SET state='FAILED',error_code='REVISION_SUPERSEDED',updated_at_us=?1 WHERE target_id=?2 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING')",params![now,workload])?;
+        tx.execute("UPDATE operations SET state='FAILED',error_code='REVISION_SUPERSEDED',updated_at_us=?1 WHERE target_id=?2 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING','UNKNOWN')",params![now,workload])?;
         if manifest.kind == "Service" {
             tx.execute("INSERT INTO service_instances(id,workload_id,revision_id,desired_state,observed_state,budget_started_at_us) VALUES(?1,?2,?3,?4,'ABSENT',?5) ON CONFLICT(workload_id) DO UPDATE SET revision_id=excluded.revision_id,restart_requested=1,observed_state=CASE WHEN service_instances.observed_state='FAILED' AND service_instances.desired_state='RUNNING' THEN 'ABSENT' ELSE service_instances.observed_state END",params![id(),workload,revision,manifest.spec.service.desired_state,now])?;
         }
@@ -620,9 +629,27 @@ impl Store {
                 params![next, now, schedule],
             )?;
         }
+        let skipped = {
+            let mut q = tx.prepare("WITH pending AS (SELECT o.id,o.scheduled_at_us,r.spec_json,CASE WHEN ?1-o.scheduled_at_us > CASE WHEN json_extract(r.spec_json,'$.spec.schedule.misfire.policy')='skip' THEN 60000000 ELSE json_extract(r.spec_json,'$.spec.schedule.misfire.maxAgeSeconds')*1000000 END THEN 'MISFIRE_EXPIRED_AT_ADMISSION' WHEN json_extract(r.spec_json,'$.spec.concurrency.mode')='forbid' AND (SELECT count(*) FROM attempts a JOIN executions e ON e.id=a.execution_id WHERE e.workload_id=o.workload_id AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN')) >= json_extract(r.spec_json,'$.spec.concurrency.maxActive') THEN 'OVERLAP_OR_UNKNOWN' END AS reason FROM occurrences o JOIN workloads w ON w.id=o.workload_id JOIN workload_revisions r ON r.id=o.revision_id WHERE o.state='QUEUED' AND w.enabled=1 AND w.paused=0) SELECT id,spec_json,reason FROM pending WHERE reason IS NOT NULL ORDER BY scheduled_at_us,id LIMIT 256")?;
+            q.query_map([now], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (occurrence, json, reason) in skipped {
+            Manifest::parse(&json)?;
+            tx.execute(
+                "UPDATE occurrences SET state='SKIPPED',reason=?1 WHERE id=?2",
+                params![reason, occurrence],
+            )?;
+        }
         let queued = {
-            let mut q=tx.prepare("SELECT o.id,o.workload_id,o.revision_id,o.scheduled_at_us,r.spec_json FROM occurrences o JOIN workloads w ON w.id=o.workload_id JOIN workload_revisions r ON r.id=o.revision_id WHERE o.state='QUEUED' AND w.enabled=1 AND w.paused=0 ORDER BY o.scheduled_at_us,o.id LIMIT 256")?;
-            q.query_map([], |r| {
+            let mut q=tx.prepare("SELECT o.id,o.workload_id,o.revision_id,o.scheduled_at_us,r.spec_json FROM occurrences o JOIN workloads w ON w.id=o.workload_id JOIN workload_revisions r ON r.id=o.revision_id WHERE o.state='QUEUED' AND w.enabled=1 AND w.paused=0 AND ?1-o.scheduled_at_us <= CASE WHEN json_extract(r.spec_json,'$.spec.schedule.misfire.policy')='skip' THEN 60000000 ELSE json_extract(r.spec_json,'$.spec.schedule.misfire.maxAgeSeconds')*1000000 END AND (SELECT count(*) FROM attempts a JOIN executions active ON active.id=a.execution_id WHERE active.workload_id=o.workload_id AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN')) < json_extract(r.spec_json,'$.spec.concurrency.maxActive') ORDER BY o.scheduled_at_us,o.id LIMIT 256")?;
+            q.query_map([now], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -810,7 +837,7 @@ impl Store {
                 tx.execute("UPDATE operations SET state=?1,error_code=?2,updated_at_us=?3 WHERE execution_id=?4",params![if state=="SUCCEEDED"{"SUCCEEDED"}else if state=="UNKNOWN"{"UNKNOWN"}else{"FAILED"},outcome.error_code,now,launch.execution_id])?;
             }
         }
-        tx.execute("UPDATE operations SET state=?1,error_code=?2,updated_at_us=?3 WHERE target_id=?4 AND operation_kind='cancel' AND state IN('ACCEPTED','RUNNING')",params![if state=="UNKNOWN"{"UNKNOWN"}else{"SUCCEEDED"},outcome.error_code,now,launch.execution_id])?;
+        tx.execute("UPDATE operations SET state=?1,error_code=?2,updated_at_us=?3 WHERE target_id=?4 AND operation_kind='cancel' AND state IN('ACCEPTED','RUNNING','UNKNOWN')",params![if state=="UNKNOWN"{"UNKNOWN"}else{"SUCCEEDED"},if state=="UNKNOWN"{outcome.error_code}else{None},now,launch.execution_id])?;
         crate::alerts::capture_result(&tx, &self.alert_policy, &launch.attempt_id, now)?;
         event(
             &tx,
@@ -925,15 +952,15 @@ impl Store {
                 serde_json::json!({"observed_state":state,"readiness_probe_configured":launch.manifest.spec.service.readiness.is_some()}),
                 now,
             )?;
-            if state == "READY" {
-                tx.execute("UPDATE operations SET state='SUCCEEDED',updated_at_us=?1 WHERE target_id=?2 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING') AND json_extract(result_json,'$.desired_state')='RUNNING' AND json_extract(result_json,'$.revision_id')=(SELECT revision_id FROM executions WHERE id=?3) AND (operation_kind!='service_restart' OR created_at_us<=(SELECT created_at_us FROM executions WHERE id=?3))",params![now,workload,launch.execution_id])?;
-            }
         }
         let workload: String = tx.query_row(
             "SELECT workload_id FROM executions WHERE id=?1",
             [&launch.execution_id],
             |r| r.get(0),
         )?;
+        if state == "READY" {
+            tx.execute("UPDATE operations SET state='SUCCEEDED',error_code=NULL,updated_at_us=?1 WHERE target_id=?2 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING','UNKNOWN') AND json_extract(result_json,'$.desired_state')='RUNNING' AND json_extract(result_json,'$.revision_id')=(SELECT revision_id FROM executions WHERE id=?3) AND EXISTS(SELECT 1 FROM service_instances si JOIN executions e ON e.workload_id=si.workload_id JOIN attempts a ON a.execution_id=e.id WHERE e.id=?3 AND a.id=?4 AND a.state='RUNNING' AND a.cancel_requested=0 AND si.desired_state='RUNNING' AND si.restart_requested=0 AND si.revision_id=e.revision_id) AND (operation_kind!='service_restart' OR created_at_us<=(SELECT created_at_us FROM executions WHERE id=?3))",params![now,workload,launch.execution_id,launch.attempt_id])?;
+        }
         crate::alerts::capture_service(&tx, &self.alert_policy, &workload, now)?;
         tx.commit()?;
         Ok(())
@@ -1264,7 +1291,7 @@ fn claim_manual(tx: &Transaction<'_>, now: i64) -> Result<Option<Launch>> {
     tx.execute("UPDATE operations SET state='FAILED',error_code='QUEUE_EXPIRED',updated_at_us=?1 WHERE id IN(SELECT operation_id FROM manual_queue WHERE expires_at_us<?1)",[now])?;
     tx.execute("DELETE FROM manual_queue WHERE expires_at_us<?1", [now])?;
     let rows = {
-        let mut q=tx.prepare("SELECT q.operation_id,q.workload_id,q.revision_id,q.actor_id,r.spec_json FROM manual_queue q JOIN workloads w ON w.id=q.workload_id JOIN workload_revisions r ON r.id=q.revision_id WHERE w.enabled=1 AND w.paused=0 ORDER BY q.created_at_us LIMIT 256")?;
+        let mut q=tx.prepare("SELECT q.operation_id,q.workload_id,q.revision_id,q.actor_id,r.spec_json FROM manual_queue q JOIN workloads w ON w.id=q.workload_id JOIN workload_revisions r ON r.id=q.revision_id WHERE w.enabled=1 AND w.paused=0 AND (SELECT count(*) FROM attempts a JOIN executions active ON active.id=a.execution_id WHERE active.workload_id=q.workload_id AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN')) < json_extract(r.spec_json,'$.spec.concurrency.maxActive') ORDER BY q.created_at_us,q.operation_id LIMIT 256")?;
         q.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1385,9 +1412,9 @@ fn service_finished(
     );
     tx.execute("UPDATE service_instances SET observed_state=?1,restart_count=?2,budget_started_at_us=?3,next_action_at_us=?4,ready_at_us=NULL,consecutive_failures=0,consecutive_successes=0,restart_reason=?5,last_observed_at_us=?6 WHERE workload_id=?7",params![observed,next_count,if reset{Some(now)}else{window},if observed=="BACKOFF"{Some(next)}else{None},state,now,workload])?;
     if observed == "FAILED" {
-        tx.execute("UPDATE operations SET state='FAILED',error_code=?1,updated_at_us=?2 WHERE target_id=?3 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING') AND json_extract(result_json,'$.desired_state')='RUNNING' AND json_extract(result_json,'$.revision_id')=(SELECT revision_id FROM service_instances WHERE workload_id=?3)",params![error_code.unwrap_or("SERVICE_NOT_READY"),now,workload])?;
+        tx.execute("UPDATE operations SET state='FAILED',error_code=?1,updated_at_us=?2 WHERE target_id=?3 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING','UNKNOWN') AND json_extract(result_json,'$.desired_state')='RUNNING' AND json_extract(result_json,'$.revision_id')=(SELECT revision_id FROM executions WHERE id=?4) AND EXISTS(SELECT 1 FROM service_instances si JOIN executions e ON e.workload_id=si.workload_id WHERE e.id=?4 AND si.desired_state='RUNNING' AND si.restart_requested=0 AND si.revision_id=e.revision_id) AND (operation_kind!='service_restart' OR created_at_us<=(SELECT created_at_us FROM executions WHERE id=?4)) AND NOT EXISTS(SELECT 1 FROM attempts a JOIN executions e ON e.id=a.execution_id WHERE e.workload_id=?3 AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN'))",params![error_code.unwrap_or("SERVICE_NOT_READY"),now,workload,launch.execution_id])?;
     }
-    tx.execute("UPDATE operations SET state=?1,error_code=?2,updated_at_us=?3 WHERE target_id=?4 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING') AND (?1='UNKNOWN' OR (?5='STOPPED' AND json_extract(result_json,'$.desired_state')='STOPPED'))",params![if state=="UNKNOWN"{"UNKNOWN"}else{"SUCCEEDED"},if state=="UNKNOWN"{Some("RECONCILIATION_REQUIRED")}else{None},now,workload,desired])?;
+    tx.execute("UPDATE operations SET state=?1,error_code=?2,updated_at_us=?3 WHERE target_id=?4 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING','UNKNOWN') AND (?1='UNKNOWN' OR (?5='STOPPED' AND operation_kind='service_desired' AND json_extract(result_json,'$.desired_state')='STOPPED' AND json_extract(result_json,'$.revision_id')=(SELECT revision_id FROM service_instances WHERE workload_id=?4) AND NOT EXISTS(SELECT 1 FROM attempts a JOIN executions e ON e.id=a.execution_id WHERE e.workload_id=?4 AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN'))))",params![if state=="UNKNOWN"{"UNKNOWN"}else{"SUCCEEDED"},if state=="UNKNOWN"{Some("RECONCILIATION_REQUIRED")}else{None},now,workload,desired])?;
     Ok(())
 }
 pub(crate) fn event(
@@ -1426,4 +1453,39 @@ pub fn protect_socket(path: &Path) -> Result<()> {
             "Cannot secure local control socket",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Child, Command, Stdio};
+
+    struct ReapedChild(Child);
+    impl Drop for ReapedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn graceful_owner_drop_unlocks_even_when_a_child_retains_its_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let store = Store::open(&state).unwrap();
+        let inherited = store._owner.0.try_clone().unwrap();
+        let mut child = ReapedChild(
+            Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(Stdio::from(inherited))
+                .spawn()
+                .unwrap(),
+        );
+        assert!(child.0.try_wait().unwrap().is_none());
+        assert!(Store::open(&state).is_err_and(|error| error.code == "OWNER_UNAVAILABLE"));
+        drop(store);
+        let replacement = Store::open(&state).unwrap();
+        assert!(child.0.try_wait().unwrap().is_none());
+        assert!(replacement.status(false).is_ok());
+    }
 }
