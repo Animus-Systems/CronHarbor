@@ -538,23 +538,32 @@ fn operator_external_grant_is_limited_to_its_preapproved_target() {
 #[test]
 fn global_log_budget_cannot_shrink_while_an_attempt_is_active_or_unknown() {
     let (d, mut s) = setup();
-    let mut m =
-        cronharbor::config::Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
-    m.spec.logs.max_disk_bytes = 16384;
+    let m = cronharbor::config::Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
+    s.set_log_storage_policy(
+        &cronharbor::contracts::LogStoragePolicyInput {
+            max_disk_bytes: 16384,
+            max_segments: 1024,
+            retention_seconds: 604800,
+        },
+        1,
+    )
+    .unwrap();
     s.apply(&m, 0).unwrap();
     let l = s.claim_due(60_000_000).unwrap().unwrap();
     s.start_requested(&l.attempt_id, 60_000_000).unwrap();
-    let mut smaller = m.clone();
-    smaller.metadata.name = "smaller".into();
-    smaller.spec.logs.max_disk_bytes = 4096;
+    let smaller = cronharbor::contracts::LogStoragePolicyInput {
+        max_disk_bytes: 4096,
+        max_segments: 1024,
+        retention_seconds: 604800,
+    };
     assert_eq!(
-        s.apply(&smaller, 61_000_000).unwrap_err().code,
+        s.set_log_storage_policy(&smaller, 2).unwrap_err().code,
         "STATE_CONFLICT"
     );
     drop(s);
-    let mut s = Store::open(d.path()).unwrap();
+    let s = Store::open(d.path()).unwrap();
     assert_eq!(
-        s.apply(&smaller, 62_000_000).unwrap_err().code,
+        s.set_log_storage_policy(&smaller, 2).unwrap_err().code,
         "STATE_CONFLICT"
     );
 }
@@ -632,7 +641,6 @@ fn namespace_scoped_admin_can_reconcile_its_own_unknown_execution() {
     assert_eq!(result["state"], "SUCCEEDED");
 }
 fn log_fixture(bytes: &[u8], terminal: bool) -> (tempfile::TempDir, Store, String) {
-    use std::io::Write;
     let (d, mut s) = setup();
     let mut m =
         cronharbor::config::Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
@@ -641,11 +649,8 @@ fn log_fixture(bytes: &[u8], terminal: bool) -> (tempfile::TempDir, Store, Strin
     let launch = s.claim_due(60_000_000).unwrap().unwrap();
     s.start_requested(&launch.attempt_id, 60_000_000).unwrap();
     s.running(&launch, 1, 60_000_000).unwrap();
-    let logs = cronharbor::store::private_directory(&d.path().join("logs")).unwrap();
-    cronharbor::store::secure_file(&logs.join(format!("{}.log", launch.attempt_id)))
-        .unwrap()
-        .write_all(bytes)
-        .unwrap();
+    s.prepare_log_capture(&launch).unwrap();
+    s.append_log(&launch, bytes).unwrap();
     if terminal {
         s.finish(
             &launch,
@@ -716,8 +721,7 @@ fn raw_log_cursor_handles_invalid_utf8_and_small_windows_without_skipping() {
 }
 #[test]
 fn active_log_waits_for_trailing_utf8_and_terminal_partial_bytes_progress() {
-    use std::io::Write;
-    let (d, mut s, attempt) = log_fixture(b"A\xf0\x9f", false);
+    let (_d, mut s, attempt) = log_fixture(b"A\xf0\x9f", false);
     let first = call(
         &mut s,
         AppCommand::Logs {
@@ -729,12 +733,16 @@ fn active_log_waits_for_trailing_utf8_and_terminal_partial_bytes_progress() {
     assert_eq!(first["text"], "A");
     assert_eq!(first["next_offset"], 1);
     assert_eq!(first["response_truncated"], false);
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(d.path().join(format!("logs/{attempt}.log")))
-        .unwrap()
-        .write_all(b"\x98\x80TAIL")
-        .unwrap();
+    let execution = s.history().unwrap().remove(0).execution_id;
+    let (_, _, manifest) = s.manifest_for("local/hello").unwrap();
+    let launch = cronharbor::store::Launch {
+        attempt_id: attempt.clone(),
+        execution_id: execution,
+        launch_nonce: uuid::Uuid::new_v4().to_string(),
+        due_at_us: 0,
+        manifest,
+    };
+    s.append_log(&launch, b"\x98\x80TAIL").unwrap();
     let second = call(
         &mut s,
         AppCommand::Logs {

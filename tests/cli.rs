@@ -54,6 +54,9 @@ fn local_cli_validates_applies_inspects_and_never_starts_a_second_owner() {
         vec!["config", "apply", "-f", fixture],
         vec!["status"],
         vec!["executions"],
+        vec!["log-storage", "status"],
+        vec!["alerts", "status"],
+        vec!["alerts", "list", "--limit", "10"],
     ] {
         let output = Command::new(binary)
             .arg("--state-dir")
@@ -77,4 +80,39 @@ fn local_cli_validates_applies_inspects_and_never_starts_a_second_owner() {
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(status["paused"], true);
     assert_eq!(status["workloads"], 1);
+
+    let updated = Command::new(binary)
+        .arg("--state-dir")
+        .arg(dir.path())
+        .args([
+            "log-storage",
+            "set",
+            "--max-disk-bytes",
+            "536870912",
+            "--max-segments",
+            "2048",
+            "--retention-seconds",
+            "1209600",
+            "--expected-revision",
+            "1",
+            "--idempotency-key",
+            "cli-log-policy-1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let output = Command::new(binary)
+        .arg("--state-dir")
+        .arg(dir.path())
+        .args(["log-storage", "status"])
+        .output()
+        .unwrap();
+    let policy: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(policy["policy"]["revision"], 2);
+    assert_eq!(policy["policy"]["max_segments"], 2048);
+    assert_eq!(policy["policy"]["retention_seconds"], 1209600);
 }

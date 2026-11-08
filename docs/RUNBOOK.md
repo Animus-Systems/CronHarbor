@@ -139,11 +139,58 @@ Native workloads run with the daemon UID and namespace. They are trusted code, n
 
 Use `execution.secretRefs` with `provider: env` plus `name`, or `provider: file` plus an absolute private file `path`. The database stores references, not resolved values. Resolved values are injected only into approved execution and redacted from captured output, including across chunk boundaries. Known sensitive environment names cannot carry plaintext values in definitions. Do not assume arbitrary unknown secrets printed by a program can always be recognized.
 
-Logs have per-run byte caps, bounded query windows, total disk/segment/age retention and explicit truncation indicators. API/CLI clients follow the server's raw `next_offset` byte cursor, including for malformed UTF-8. Recovered Docker logs use the owned container's original launch secret values; if those cannot all be verified, capture is withheld and the container is retained. The tightest configured current `maxDiskBytes` is the installation's effective log budget. Lowering it requires draining/reconciling active or UNKNOWN attempts. Protected unresolved execution evidence is retained; a full storage/audit path blocks new effects.
+Native output is one logical byte stream per attempt. Without `logs.rotation`, `maxRunBytes` preserves the bounded beginning of output as before. Explicit rotation retains the newest complete-segment window, with `maxRunBytes` as its retained-byte ceiling:
 
-`maxDiskBytes`, `maxSegments` and `retentionSeconds` control retention across the installation. Existing-definition changes require an Admin credential with `operations.manage` and wildcard namespace scope, or the trusted local owner. Scoped creators may add a workload only if its limits do not tighten the current installation limits. `maxRunBytes` remains a per-workload safe edit. These checks apply to single and batch configuration changes; they preserve the active/UNKNOWN disk-budget guard.
+```yaml
+logs:
+  maxRunBytes: 10485760
+  rotation:
+    segmentBytes: 1048576
+    maxSegments: 10
+```
+
+This example retains at most 10 MiB in at most ten 1 MiB segments. Rotation is native-only and opt-in; apply a reviewed definition revision for future attempts. It does not rewrite the capture policy of an already running attempt. Older sealed segments can expire while a known RUNNING rolling workload continues. UNKNOWN freezes whatever evidence remains, including its capacity charge; already expired history cannot be recovered by freezing.
+
+API/CLI clients follow the server's raw `next_offset` byte cursor, including malformed UTF-8. `logs ATTEMPT_ID --info` and `GET /api/v1/executions/EXECUTION_ID/logs/info` report retained start/end, capture state and known loss. An explicit offset below retained start returns `LOG_CURSOR_EXPIRED` (HTTP 409). Omit the offset to select the current retained start and read it within one daemon command; CLI/MCP defaults and dashboard initial/recovery reads use that path. Followers display the gap before resuming. The dashboard follows every five seconds and bounds unchanged diagnostic refreshes, preserving the existing request budget; changed execution state and explicit diagnostic refresh fetch current evidence. A missing expected retained file is unavailable evidence, not EOF.
+
+Native pipe readers redact before the bounded queue. If intake, storage or capture slots are exhausted, output saving stops with an explicit reason while the workload can continue; it does not silently resume within that attempt. The viewer distinguishes frozen evidence, expired history and stopped/truncated capture. Docker/systemd retain bounded terminal snapshots with the existing additional 1 MiB limit, not continuous rotating ingestion. Recovered Docker logs use the original launch secret values; unverifiable context withholds capture and retains the container.
+
+One versioned installation policy now owns shared disk, physical-segment and eligible-segment age limits. Inspect and update it through Settings or the trusted CLI:
+
+```sh
+./target/debug/cronharbor log-storage status
+./target/debug/cronharbor log-storage set --max-disk-bytes 268435456 --max-segments 1024 \
+  --retention-seconds 604800 --expected-revision CURRENT_REVISION \
+  --idempotency-key reviewed-log-policy-001
+```
+
+Use the actual revision from status and a fresh key per new reviewed intent. These controls require local owner or Admin with unscoped `operations.manage` and wildcard namespaces. Decreases are rejected while active/UNKNOWN attempts or log reservations exist; protected/unexplained evidence is never deleted to make a proposal fit. Larger approved count/age values are effective, rather than silently capped at old defaults. The byte budget covers captured log-file bytes, not filesystem block overhead, SQLite/WAL, backups, daemon output or Docker/journald's own storage.
+
+Upgrade seeds this policy once from conservative effective legacy limits. Existing immutable definitions/files remain readable; unchanged legacy `logs.maxDiskBytes`, `logs.maxSegments` and `logs.retentionSeconds` can remain or be removed. New or changed explicit legacy values are rejected with `LOG_POLICY_MOVED`; use the installation policy instead. `maxRunBytes` and rotation remain per-workload safe configuration edits and cannot override the installation ceiling. Source files remain FILE-owned.
 
 HTTP allows 240 unrecognized credential checks per minute per API process before daemon work, separately from authenticated request limits. A new or evicted credential can receive 429 during rejection traffic; retry after the minute window and configure network-level admission at a remote proxy. Verified hashes stay in the bounded table across request-window resets, with expired entries evicted only to admit another verified credential. This does not cache authorization: every operation still checks revocation. Authentication rejection evidence is sampled at most once per second per daemon owner and retains only its latest 1,000 records across restarts. Other audit history is preserved; rejection samples are not a complete attempt count.
+
+## Outbound alert webhooks
+
+Use API, Full, or a Core build with `--features webhooks`. An absent `alerts` block disables capture and sending. A configured destination in a binary without that feature fails explicitly. Add [the example alert block](../examples/optional/alerts.yaml) to daemon configuration and restart; there is no remote destination editor.
+
+Provision an HTTPS receiver and a separate ingestion-only credential first. The token is 1–512 visible ASCII bytes, from an environment reference or owned private regular file (0600, no symlink/hard link). File credentials may end with one LF or CRLF. It is resolved per request so file rotation does not change destination identity. An optional CA file supplies internal trust and is limited to 1 MiB; hostname verification remains enabled. Container/native service users need explicit access to these deployment resources.
+
+Public unicast destinations are allowed. Private RFC1918/ULA and loopback addresses require exact entries in `allowedPrivateAddresses` (at most 16); link-local, unspecified, multicast, broadcast and mapped-address bypasses are rejected. The sender validates at most 16 DNS answers and pins the approved set to each HTTPS request. Ambient proxy configuration and redirects cannot change its destination. An endpoint change retires old outstanding deliveries; they are not redirected to the new API.
+
+```sh
+./target/debug/cronharbor alerts status
+./target/debug/cronharbor alerts list --limit 25
+./target/debug/cronharbor alerts retry ALERT_ID --idempotency-key reviewed-alert-retry-1
+```
+
+Status/list/retry require installation-wide Admin authority (`operations.manage` and wildcard namespaces) or the trusted local owner. The dashboard Settings panel uses the same backend rules. A retry is one additional send with the original ID and body, not a workload restart or a new automatic retry cycle. Polling never resubmits it. Blocked credentials/TLS/destination require repair and explicit retry; HTTP redirects are failures. No resolved credential, raw receiver body or log excerpt enters delivery history.
+
+The queue holds at most 1,000 outstanding alerts, each at most 8,192 bytes. Overflow is visibly suppressed, not delivered. Automatic attempts are bounded to 12 within 24 hours; terminal history is bounded to 1,000 rows and seven days. These limits exclude SQLite/WAL and backup file sizes. A slow or stuck resolver makes delivery unavailable without blocking scheduling or spawning replacements indefinitely.
+
+Job alerts follow final failure/timeout after automatic retries. `UNKNOWN` alerts describe uncertainty, not proven failure. Service incidents use existing health thresholds; recovery requires actual `READY`. Pause and intentional stop preserve an open incident; stop sends no false recovery. Decommission closure is outside v1. The receiving API must durably accept and deduplicate before acknowledging, then track Grokbot processing itself. See [the complete receiver contract](api/WEBHOOKS.md).
+
+Ordinary pause keeps existing notifications deliverable. Restore quarantine holds the restored queue and creates no fresh source markers. Explicit evidence/cutoff resume expires historical held alerts instead of replaying them, then observes current actionable states. Review an individual expired row before retrying; backup restoration cannot guarantee continuous or exactly-once notification.
 
 ## Backup, restore and upgrades
 
@@ -154,7 +201,7 @@ HTTP allows 240 unrecognized credential checks per minute per API process before
 
 Backups use SQLite's backup API, integrity/foreign-key checks, a SHA-256 manifest and private durable files. Preserve the previous binary/image digest. Schema migrations are monotonic and checksummed; an unsupported version/checksum fails closed. Never copy only a live WAL main file.
 
-Schema version 3 adds an index for bounded rejection-history cleanup and removes `auth.reject` records older than the latest 1,000, leaving all other audit actions intact. Upgrade preserves a private pre-migration database backup. Version 1/2 snapshots remain supported and upgrade under restore quarantine. Older binaries cannot open version 3; rollback requires the matching older binary and a verified pre-upgrade snapshot, followed by the normal restore reconciliation procedure.
+Schema version 3 bounded authentication rejection history; version 4 adds logical log streams, segments and the installation log policy; version 5 adds incident markers and the alert outbox. Upgrade preserves a private pre-migration database backup. Earlier supported snapshots upgrade under restore quarantine. Older binaries cannot open the new schema; rollback requires the matching older binary and a verified pre-upgrade snapshot, followed by normal restore reconciliation.
 
 Transfer the snapshot and its `.db.manifest.json` sidecar together. Both must be regular files owned by the restoring user with no group/other permissions or additional hard links. Symlink or FIFO sidecars are rejected before installation; preserve mode 0600 when archiving or moving backups.
 
@@ -162,6 +209,7 @@ The snapshot contains SQLite state, including workload revisions and log metadat
 
 - `STATE_DIR/executors.json` (private mode 0600); without it, external adapters default to disabled.
 - `STATE_DIR/logs/`; database log metadata alone cannot recover captured bytes.
+- Daemon alert endpoint configuration, ingestion credential and optional internal CA file; backups include delivery rows and incident markers, but no resolved webhook credential.
 - Referenced secret files and the daemon's secret environment, executables, pinned images and existing systemd units.
 - Daemon configuration and static UI assets. Review endpoint/origin settings for the recovery installation.
 

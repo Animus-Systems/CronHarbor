@@ -32,11 +32,11 @@ fn referenced_secret_is_injected_and_redacted_from_captured_logs() {
     s.apply(&m, 0).unwrap();
     let l = s.claim_due(60_000_000).unwrap().unwrap();
     s.start_requested(&l.attempt_id, 60_000_000).unwrap();
-    let mut p = RunningProcess::spawn(&l, d.path()).unwrap();
+    let mut p = RunningProcess::spawn(&l, &mut s).unwrap();
     s.running(&l, p.pid(), 60_000_000).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(o) = p.poll().unwrap() {
+        if let Some(o) = p.poll(&mut s).unwrap() {
             assert_eq!(o.state, EndState::Succeeded);
             s.finish(&l, &o, 61_000_000).unwrap();
             break;
@@ -49,7 +49,7 @@ fn referenced_secret_is_injected_and_redacted_from_captured_logs() {
 }
 #[test]
 fn service_readiness_requires_a_passing_bounded_exec_probe() {
-    let (d, mut s) = store();
+    let (_d, mut s) = store();
     let mut m = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
     m.kind = "Service".into();
     m.spec.execution.command = "/bin/sleep".into();
@@ -64,9 +64,9 @@ fn service_readiness_requires_a_passing_bounded_exec_probe() {
     });
     s.apply(&m, 0).unwrap();
     let l = s.claim_due(1).unwrap().unwrap();
-    let mut p = RunningProcess::spawn(&l, d.path()).unwrap();
+    let mut p = RunningProcess::spawn(&l, &mut s).unwrap();
     for _ in 0..20 {
-        p.poll().unwrap();
+        p.poll(&mut s).unwrap();
         thread::sleep(Duration::from_millis(10));
     }
     assert_ne!(p.service_observation(), "READY");
@@ -75,6 +75,15 @@ fn service_readiness_requires_a_passing_bounded_exec_probe() {
 #[test]
 fn total_log_disk_cap_bounds_simultaneous_processes() {
     let (d, mut s) = store();
+    s.set_log_storage_policy(
+        &cronharbor::contracts::LogStoragePolicyInput {
+            max_disk_bytes: 4096,
+            max_segments: 1024,
+            retention_seconds: 604800,
+        },
+        1,
+    )
+    .unwrap();
     let mut launches = Vec::new();
     for name in ["one", "two"] {
         let mut m = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
@@ -82,13 +91,13 @@ fn total_log_disk_cap_bounds_simultaneous_processes() {
         m.spec.execution.command = "/bin/echo".into();
         m.spec.execution.args = vec!["a".repeat(6000)];
         m.spec.logs.max_run_bytes = 8192;
-        m.spec.logs.max_disk_bytes = 4096;
+
         s.apply(&m, 0).unwrap();
     }
     for _ in 0..2 {
         let launch = s.claim_due(60_000_000).unwrap().unwrap();
         s.start_requested(&launch.attempt_id, 60_000_000).unwrap();
-        let process = RunningProcess::spawn(&launch, d.path()).unwrap();
+        let process = RunningProcess::spawn(&launch, &mut s).unwrap();
         s.running(&launch, process.pid(), 60_000_000).unwrap();
         launches.push((launch, process));
     }
@@ -102,7 +111,7 @@ fn total_log_disk_cap_bounds_simultaneous_processes() {
     while !launches.is_empty() {
         let mut i = 0;
         while i < launches.len() {
-            if let Some(outcome) = launches[i].1.poll().unwrap() {
+            if let Some(outcome) = launches[i].1.poll(&mut s).unwrap() {
                 s.finish(&launches[i].0, &outcome, 61_000_000).unwrap();
                 launches.swap_remove(i);
             } else {

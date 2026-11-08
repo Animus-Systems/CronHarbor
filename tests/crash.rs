@@ -23,7 +23,7 @@ fn owner_sigkill_after_spawn_never_replays_an_uncertain_effect() {
         store
             .start_requested(&launch.attempt_id, 60_000_000)
             .unwrap();
-        let process = RunningProcess::spawn(&launch, &directory).unwrap();
+        let process = RunningProcess::spawn(&launch, &mut store).unwrap();
         fs::write(directory.join("spawned.pid"), process.pid().to_string()).unwrap();
         loop {
             thread::sleep(Duration::from_secs(1));

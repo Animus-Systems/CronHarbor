@@ -42,11 +42,11 @@ fn sigkill_at_each_lifecycle_boundary_preserves_evidence_without_replaying_effec
                 .unwrap();
         }
         if matches!(phase.as_str(), "receipt" | "terminal") {
-            let mut process = RunningProcess::spawn(&launch, &directory).unwrap();
+            let mut process = RunningProcess::spawn(&launch, &mut store).unwrap();
             store.running(&launch, process.pid(), 60_000_000).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                if let Some(outcome) = process.poll().unwrap() {
+                if let Some(outcome) = process.poll(&mut store).unwrap() {
                     assert_eq!(outcome.state, EndState::Succeeded);
                     assert_eq!(fs::read_to_string(&effect).unwrap(), "effect");
                     if phase == "terminal" {

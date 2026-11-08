@@ -1,3 +1,4 @@
+pub mod alerts;
 #[cfg(feature = "api")]
 pub mod api;
 pub mod application;
@@ -5,6 +6,7 @@ pub mod config;
 pub mod contracts;
 pub mod external;
 pub mod importer;
+pub mod logs;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod ops;
@@ -13,6 +15,8 @@ pub mod process;
 pub mod scheduler;
 pub mod server;
 pub mod store;
+#[cfg(feature = "webhooks")]
+pub mod webhooks;
 
 use serde::{Deserialize, Serialize};
 

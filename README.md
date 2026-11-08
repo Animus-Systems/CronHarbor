@@ -20,8 +20,9 @@ CronHarbor records what it can verify. If a crash leaves an external effect unce
 | Services | Desired and observed state, readiness/liveness probes, startup grace, restart backoff and budgets, manual start/stop/restart |
 | Execution | Native processes, opt-in Docker with digest-pinned images, and an allowlisted bridge to existing systemd units |
 | Control | Owner-only CLI, authenticated REST/SSE, Vue dashboard, and ten read-only MCP observation tools |
-| Evidence | Immutable definition revisions, compare-and-swap updates, idempotent operations, audit history, bounded/redacted logs, and explicit reconciliation |
+| Evidence | Immutable definition revisions, compare-and-swap updates, idempotent operations, audit history, bounded/redacted native log rotation, and explicit reconciliation |
 | Operations | Verified SQLite backups, paused restore quarantine, explicit cutoff/resume, and passive Cronicle import reports |
+| Alerts | Optional HTTPS incident metadata to one LAN/public API, a bounded durable outbox and explicit operator retries |
 
 The scope is one scheduling owner per installation. Distributed workers, workflow DAGs, and write-capable MCP are outside the current scope.
 
@@ -83,10 +84,11 @@ Enter the private file's token in the dashboard. Remove that credential file whe
 | Profile | Build | Includes |
 |---|---|---|
 | Core | `cargo build --locked` | Scheduler, supervisor, CLI, local Unix socket; no TCP listener or MCP |
+| Core + webhooks | `cargo build --locked --features webhooks` | Core with optional outbound HTTPS alerts; no TCP listener or MCP |
 | API | `cargo build --locked --features api` | Core plus authenticated REST/SSE and optional static UI hosting |
 | Full | `cargo build --locked --features full` | API plus read-only MCP; build Vue assets separately for source installs |
 
-The Dockerfile has matching `core`, `api`, and `full` targets. Default `docker compose up --build -d` starts the headless Core profile. The Full image includes the built dashboard; no production Node.js server is needed.
+API and Full include webhook support, activated only by daemon configuration. The Dockerfile has matching `core`, `api`, and `full` targets. Default `docker compose up --build -d` starts the headless Core profile. The Full image includes the built dashboard; no production Node.js server is needed.
 
 ## How it fits together
 
@@ -134,6 +136,8 @@ Durable occurrence deduplication does not guarantee exactly-once external effect
 ./target/debug/cronharbor config plan -f examples
 ./target/debug/cronharbor jobs list
 ./target/debug/cronharbor executions
+./target/debug/cronharbor log-storage status
+./target/debug/cronharbor alerts status
 ./target/debug/cronharbor services list
 ```
 

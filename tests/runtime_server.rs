@@ -406,17 +406,24 @@ fn manual_service_restart_works_when_automatic_restart_budget_is_zero() {
     );
 }
 #[test]
-fn mixed_log_caps_use_the_minimum_global_budget_for_active_writes() {
+fn installation_policy_bounds_simultaneous_active_writes() {
     let mut a = job();
     a.kind = "OneShotJob".into();
     a.spec.execution.command = "/usr/bin/yes".into();
     a.spec.execution.args = vec!["x".into()];
     a.spec.logs.max_run_bytes = 8192;
-    a.spec.logs.max_disk_bytes = 16384;
     let mut b = a.clone();
     b.metadata.name = "smaller".into();
-    b.spec.logs.max_disk_bytes = 4096;
     let d = Daemon::new(a);
+    d.call(AppCommand::SetLogStorage {
+        policy: cronharbor::contracts::LogStoragePolicyInput {
+            max_disk_bytes: 4096,
+            max_segments: 1024,
+            retention_seconds: 604800,
+        },
+        expected_revision: 1,
+        idempotency_key: "log-budget".into(),
+    });
     d.call(AppCommand::Apply {
         definition: serde_json::to_string(&b).unwrap(),
         source_kind: "FILE".into(),
@@ -702,5 +709,166 @@ fn start_during_slow_service_stop_replaces_the_cancelled_process() {
             items.iter().filter(|row| row["state"] == "RUNNING").count(),
             1
         );
+    }
+}
+
+#[test]
+fn unavailable_aged_restore_logs_do_not_block_startup_or_kill_periodic_owner() {
+    use cronharbor::{
+        ops,
+        process::{EndState, Outcome},
+        store::Store,
+    };
+    use std::io::Write;
+    struct Owner {
+        shutdown: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<cronharbor::Result<()>>>,
+    }
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+    for phase in ["startup", "periodic"] {
+        for loss in ["missing", "short", "extra"] {
+            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let source = root.path().join("source");
+            let target = root.path().join("restore");
+            let mut store = Store::open(&source).unwrap();
+            let manifest = job();
+            store.apply(&manifest, 0).unwrap();
+            let launch = store.claim_due(60_000_000).unwrap().unwrap();
+            store.start_requested(&launch.attempt_id, 0).unwrap();
+            store.running(&launch, 1, 0).unwrap();
+            store.prepare_log_capture(&launch).unwrap();
+            store.append_log(&launch, b"evidence").unwrap();
+            store
+                .finish(
+                    &launch,
+                    &Outcome {
+                        state: EndState::Succeeded,
+                        error_code: None,
+                        exit_code: Some(0),
+                        log_bytes: 8,
+                        log_truncated: false,
+                    },
+                    1,
+                )
+                .unwrap();
+            if phase == "startup" {
+                let db = rusqlite::Connection::open(source.join("state.db")).unwrap();
+                db.execute("UPDATE log_segments SET created_at_us=1", [])
+                    .unwrap();
+            }
+            let backup = store.backup("restore-evidence").unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            drop(store);
+            ops::restore(
+                &target,
+                Path::new(&backup),
+                None,
+                "aged log restore fixture",
+                false,
+            )
+            .unwrap();
+            let logs = cronharbor::store::private_directory(&target.join("logs")).unwrap();
+            let log = logs.join(format!("{}.log", launch.attempt_id));
+            let changed = match loss {
+                "missing" => None,
+                "short" => Some(b"eve".as_slice()),
+                "extra" => Some(b"evidence unexplained tail".as_slice()),
+                _ => unreachable!(),
+            };
+            if phase == "periodic" {
+                cronharbor::store::secure_file(&log)
+                    .unwrap()
+                    .write_all(b"evidence")
+                    .unwrap();
+            } else if let Some(bytes) = changed {
+                cronharbor::store::secure_file(&log)
+                    .unwrap()
+                    .write_all(bytes)
+                    .unwrap();
+            }
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&shutdown);
+            let path = target.clone();
+            let mut owner = Owner {
+                shutdown,
+                thread: Some(thread::spawn(move || {
+                    server::run_with_shutdown(&path, &[], true, flag)
+                })),
+            };
+            let deadline = Instant::now() + Duration::from_secs(4);
+            loop {
+                if server::client(&target, Request::Status).is_ok() {
+                    break;
+                }
+                if owner.thread.as_ref().unwrap().is_finished() {
+                    let result = owner.thread.take().unwrap().join().unwrap();
+                    assert!(
+                        result.is_ok(),
+                        "{phase}/{loss}: daemon stopped before control socket: {result:?}"
+                    );
+                    panic!("daemon unexpectedly stopped");
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{phase}/{loss}: daemon did not start"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            if phase == "periodic" {
+                match changed {
+                    Some(bytes) => std::fs::write(&log, bytes).unwrap(),
+                    None => std::fs::remove_file(&log).unwrap(),
+                };
+                let db = rusqlite::Connection::open(target.join("state.db")).unwrap();
+                db.execute("UPDATE log_segments SET created_at_us=1", [])
+                    .unwrap();
+                thread::sleep(Duration::from_millis(1300));
+            }
+            assert!(
+                server::client(&target, Request::Status).is_ok(),
+                "{phase}/{loss}: unavailable evidence killed owner"
+            );
+            let info = server::client(
+                &target,
+                Request::Execute {
+                    command: Box::new(AppCommand::LogInfo {
+                        attempt_id: launch.attempt_id.clone(),
+                    }),
+                    token: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(info["last_error_code"], "LOG_UNAVAILABLE", "{phase}/{loss}");
+            assert_eq!(
+                info["retained_bytes"], 8,
+                "{phase}/{loss}: evidence reservation was released"
+            );
+            if let Some(bytes) = changed {
+                assert_eq!(
+                    std::fs::read(&log).unwrap(),
+                    bytes,
+                    "{phase}/{loss}: unavailable evidence was removed"
+                );
+            }
+            let usage = server::client(
+                &target,
+                Request::Execute {
+                    command: Box::new(AppCommand::LogStorage),
+                    token: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(usage["usage"]["retained_bytes"], 8);
+            assert!(usage["usage"]["capture_error_count"].as_u64().unwrap() > 0);
+        }
     }
 }

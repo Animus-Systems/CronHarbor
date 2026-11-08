@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { logStream } from "../tests/log-fixtures";
 import type { Page } from "@playwright/test";
 import type {
   ExecutionDto,
@@ -66,6 +67,44 @@ const operation: OperationDto = {
   error_code: null,
 };
 
+test("a new attempt invalidates queued-retry evidence and repeated diagnostics failures back off", async ({ page }) => {
+  let running = false;
+  let reads = 0;
+  const failed: ExecutionDto = { ...execution, state: "FAILED", exit_code: 1, error_code: "EXIT_NONZERO" };
+  const active: ExecutionDto = { ...failed, attempt_id: "new_attempt", state: "RUNNING", finished_at_us: null, exit_code: null, error_code: null };
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
+    if (path === "/events") return;
+    if (path === `/diagnostics/${execution.execution_id}`) {
+      reads += 1;
+      if (running) {
+        await route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
+        return;
+      }
+    }
+    const selected = running ? active : failed;
+    const value: unknown = path === "/session" ? principal
+      : path === "/status" ? status
+      : path === "/workloads" ? { items: [workload], next_cursor: null }
+      : path === `/workloads/${workload.id}` ? workload
+      : path === "/executions" ? { items: [selected], next_cursor: null }
+      : path === `/executions/${execution.execution_id}` ? selected
+      : path === `/diagnostics/${execution.execution_id}` ? { execution_id: execution.execution_id, state: "FAILED", observed_causes: [], hypotheses: [], evidence: [], safe_to_retry_automatically: true } satisfies DiagnosticDto
+      : path.endsWith("/logs") ? { stream: logStream(selected.attempt_id), attempt_id: selected.attempt_id, next_offset: 0, text: "", response_truncated: false, log_truncated: false, untrusted: true } satisfies LogDto
+      : { items: [], next_cursor: null };
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(value) });
+  });
+  await connect(page, `/#/executions/${execution.execution_id}`);
+  await expect(page.getByText("Retry queued.", { exact: false })).toBeVisible();
+  running = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("The daemon or executor is unavailable.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Retry queued.", { exact: false })).toHaveCount(0);
+  await page.waitForTimeout(12000);
+  expect(reads).toBe(3);
+  await expect(page.getByRole("button", { name: "Cancel execution", exact: true })).toBeEnabled();
+});
+
 for (const recovery of ["normal", "poll", "refresh"] as const) {
 test(`a queued retry remains cancellable while preserving the failed attempt (${recovery})`, async ({ page }) => {
   let pending = true;
@@ -98,7 +137,8 @@ test(`a queued retry remains cancellable while preserving the failed attempt (${
       : path === `/executions/${failed.execution_id}` ? failed
       : path === `/diagnostics/${failed.execution_id}` ? diagnostic
       : path === "/operations/cancel_retry" ? cancelled
-      : path.endsWith("/logs") ? { attempt_id: failed.attempt_id, next_offset: 0, text: "", response_truncated: false, log_truncated: false, untrusted: true } satisfies LogDto
+      : path.endsWith("/logs/info") ? logStream(failed.attempt_id)
+      : path.endsWith("/logs") ? { stream: logStream(failed.attempt_id), attempt_id: failed.attempt_id, next_offset: 0, text: "", response_truncated: false, log_truncated: false, untrusted: true } satisfies LogDto
       : { items: [], next_cursor: null };
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(value) });
   });

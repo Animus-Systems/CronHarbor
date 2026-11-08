@@ -13,7 +13,10 @@ spec:
     workingDirectory: /tmp
   timeoutSeconds: 30
   logs:
-    maxRunBytes: 1048576
+    maxRunBytes: 10485760
+    rotation:
+      segmentBytes: 1048576
+      maxSegments: 10
   service:
     desiredState: STOPPED
     restart: on-failure

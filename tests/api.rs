@@ -15,6 +15,37 @@ use tower::ServiceExt;
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Runtime::new().unwrap()
 }
+#[test]
+fn alert_routes_forward_bounded_queries_and_an_explicit_retry_intent() {
+    runtime().block_on(async {
+        for (path, action) in [
+            ("/api/v1/alerts/status", "alert_status"),
+            ("/api/v1/alerts/deliveries?limit=25&cursor=after-one", "alert_deliveries"),
+        ] {
+            let (dir, server) = fake(json!({"data":{"items":[],"next_cursor":null},"error":null}));
+            let response = api::router(dir.path().into(), None, vec![])
+                .oneshot(request("GET", path, Some("admin"), json!(null))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let wire = server.join().unwrap();
+            assert_eq!(wire["app_command"]["action"], action);
+            if action == "alert_deliveries" {
+                assert_eq!(wire["app_command"]["limit"], 25);
+                assert_eq!(wire["app_command"]["cursor"], "after-one");
+            }
+        }
+        let operation = json!({"id":"op_retry","state":"ACCEPTED","target_id":"alert-1","kind":"alert_retry","created_at_us":1,"error_code":null});
+        let (dir, server) = fake(json!({"data":operation,"error":null}));
+        let mut call = request("POST", "/api/v1/alerts/deliveries/alert-1/retry", Some("admin"), json!({}));
+        call.headers_mut().insert("idempotency-key", "reviewed-retry".parse().unwrap());
+        let response = api::router(dir.path().into(), None, vec![]).oneshot(call).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers()["location"], "/api/v1/operations/op_retry");
+        let wire = server.join().unwrap();
+        assert_eq!(wire["app_command"]["action"], "retry_alert");
+        assert_eq!(wire["app_command"]["id"], "alert-1");
+        assert_eq!(wire["app_command"]["idempotency_key"], "reviewed-retry");
+    });
+}
 fn accept_rpc(socket: &UnixListener) -> (UnixStream, Value) {
     let read = || {
         let (stream, _) = socket.accept().unwrap();
@@ -52,6 +83,137 @@ fn request(method: &str, path: &str, token: Option<&str>, body: Value) -> Reques
         request = request.header("authorization", format!("Bearer {token}"));
     }
     request.body(Body::from(body.to_string())).unwrap()
+}
+
+#[test]
+fn log_storage_routes_forward_policy_cas_and_explicit_idempotency() {
+    runtime().block_on(async {
+        let (dir, server) = fake(json!({"data":{"policy":{"revision":1}},"error":null}));
+        let response = api::router(dir.path().into(), None, vec![])
+            .oneshot(request("GET", "/api/v1/log-storage", Some("admin"), json!(null)))
+            .await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(server.join().unwrap()["app_command"]["action"], "log_storage");
+
+        let operation = json!({"id":"op_policy","state":"SUCCEEDED","target_id":"2","kind":"log_storage","created_at_us":1,"error_code":null});
+        let (dir, server) = fake(json!({"data":operation,"error":null}));
+        let mut req = request("POST", "/api/v1/log-storage", Some("admin"), json!({
+            "policy":{"max_disk_bytes":536870912,"max_segments":2048,"retention_seconds":1209600},
+            "expected_revision":1
+        }));
+        req.headers_mut().insert("idempotency-key", "policy-intent-1".parse().unwrap());
+        let response = api::router(dir.path().into(), None, vec![]).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers()["location"], "/api/v1/operations/op_policy");
+        let wire = server.join().unwrap();
+        assert_eq!(wire["app_command"]["action"], "set_log_storage");
+        assert_eq!(wire["app_command"]["expected_revision"], 1);
+        assert_eq!(wire["app_command"]["policy"]["max_disk_bytes"], 536870912);
+        assert_eq!(wire["app_command"]["idempotency_key"], "policy-intent-1");
+    });
+}
+
+#[test]
+fn log_info_uses_authenticated_execution_lookup_and_shared_daemon_query() {
+    runtime().block_on(async {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = UnixListener::bind(dir.path().join("control.sock")).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, lookup) = accept_rpc(&socket);
+            assert_eq!(lookup["app_command"]["action"], "execution");
+            writeln!(
+                stream,
+                "{}",
+                json!({"data":{"attempt_id":"attempt-1"},"error":null})
+            )
+            .unwrap();
+            let (mut stream, query) = accept_rpc(&socket);
+            writeln!(
+                stream,
+                "{}",
+                json!({"data":{"attempt_id":"attempt-1","retained_from_offset":65536},"error":null})
+            )
+            .unwrap();
+            query
+        });
+        let response = api::router(dir.path().into(), None, vec![])
+            .oneshot(request(
+                "GET",
+                "/api/v1/executions/execution-1/logs/info",
+                Some("scoped"),
+                json!(null),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["retained_from_offset"], 65536);
+        let query = server.join().unwrap();
+        assert_eq!(query["app_command"]["action"], "log_info");
+        assert_eq!(query["app_command"]["attempt_id"], "attempt-1");
+        assert_eq!(query["token"], "scoped");
+    });
+}
+#[test]
+fn omitted_log_cursor_selects_an_atomic_retained_read_and_explicit_cursor_is_preserved() {
+    runtime().block_on(async {
+        for (suffix, action) in [
+            ("?max_bytes=32", "latest_logs"),
+            ("?offset=0&max_bytes=32", "logs"),
+        ] {
+            let dir = tempfile::tempdir_in("/tmp").unwrap();
+            let socket = UnixListener::bind(dir.path().join("control.sock")).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = accept_rpc(&socket);
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"data":{"attempt_id":"attempt-1"},"error":null})
+                )
+                .unwrap();
+                let (mut stream, request) = accept_rpc(&socket);
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"data":{"text":"current"},"error":null})
+                )
+                .unwrap();
+                request
+            });
+            let response = api::router(dir.path().into(), None, vec![])
+                .oneshot(request(
+                    "GET",
+                    &format!("/api/v1/executions/execution-1/logs{suffix}"),
+                    Some("scoped"),
+                    json!(null),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let wire = server.join().unwrap();
+            assert_eq!(wire["app_command"]["action"], action);
+            assert_eq!(wire["token"], "scoped");
+            if action == "logs" {
+                assert_eq!(wire["app_command"]["offset"], 0);
+            } else {
+                assert!(wire["app_command"].get("offset").is_none());
+            }
+        }
+    });
+}
+
+#[test]
+fn expired_log_cursor_has_a_safe_conflict_response() {
+    runtime().block_on(async {
+        let (dir, server) = fake(json!({"data":null,"error":{"code":"LOG_CURSOR_EXPIRED","message":"private log path and secret"}}));
+        let response = api::router(dir.path().into(), None, vec![])
+            .oneshot(request("GET", "/api/v1/workloads/workload", Some("scoped"), json!(null)))
+            .await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let value = json_body(response).await;
+        assert_eq!(value["error"]["code"], "LOG_CURSOR_EXPIRED");
+        assert!(!value.to_string().contains("private"));
+        server.join().unwrap();
+    });
 }
 async fn json_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap()

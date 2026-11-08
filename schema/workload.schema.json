@@ -188,13 +188,36 @@
         "graceSeconds"
       ]
     },
+    "LogRotation": {
+      "type": "object",
+      "properties": {
+        "maxSegments": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "segmentBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "segmentBytes",
+        "maxSegments"
+      ]
+    },
     "Logs": {
       "type": "object",
       "properties": {
         "maxDiskBytes": {
-          "type": "integer",
+          "description": "Legacy installation control. Existing values may be retained or removed, but not changed.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
-          "default": 268435456,
           "minimum": 0
         },
         "maxRunBytes": {
@@ -203,16 +226,32 @@
           "minimum": 0
         },
         "maxSegments": {
-          "type": "integer",
+          "description": "Legacy installation control; use the installation log storage policy.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
-          "default": 1024,
           "minimum": 0
         },
         "retentionSeconds": {
-          "type": "integer",
+          "description": "Legacy installation control; use the installation log storage policy.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
-          "default": 604800,
           "minimum": 0
+        },
+        "rotation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogRotation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -565,10 +604,7 @@
         "logs": {
           "$ref": "#/$defs/Logs",
           "default": {
-            "maxDiskBytes": 268435456,
-            "maxRunBytes": 10485760,
-            "maxSegments": 1024,
-            "retentionSeconds": 604800
+            "maxRunBytes": 10485760
           }
         },
         "owner": {

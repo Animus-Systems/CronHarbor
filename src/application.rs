@@ -11,11 +11,7 @@ use chrono_tz::Tz;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{
-    fs::File,
-    io::{Read, Seek, SeekFrom},
-    str::FromStr,
-};
+use std::str::FromStr;
 fn encode(value: impl serde::Serialize) -> Result<Value> {
     serde_json::to_value(value)
         .map_err(|_| Error::new("INTERNAL_ERROR", "Cannot encode application response"))
@@ -144,39 +140,12 @@ fn require_instance_operations(principal: &Principal) -> Result<()> {
     }
 }
 fn require_log_policy(
-    store: &Store,
-    principal: &Principal,
+    _store: &Store,
+    _principal: &Principal,
     old: Option<&Manifest>,
     new: &Manifest,
 ) -> Result<()> {
-    let policy = |m: &Manifest| {
-        (
-            m.spec.logs.max_disk_bytes,
-            m.spec.logs.max_segments,
-            m.spec.logs.retention_seconds,
-        )
-    };
-    let changed = if let Some(old) = old {
-        policy(old) != policy(new)
-    } else {
-        let defaults = crate::config::Logs::default();
-        let (segments, age): (u32, i64) = store.connection.query_row(
-            "SELECT MIN(?1,COALESCE(MIN(json_extract(r.spec_json,'$.spec.logs.maxSegments')),?1)),MIN(?2,COALESCE(MIN(json_extract(r.spec_json,'$.spec.logs.retentionSeconds')),?2)) FROM workloads w JOIN workload_revisions r ON r.id=w.current_revision_id",
-            params![defaults.max_segments, i64::try_from(defaults.retention_seconds).unwrap_or(i64::MAX)],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        new.spec.logs.max_disk_bytes < store.log_disk_limit()?
-            || new.spec.logs.max_segments < segments
-            || new.spec.logs.retention_seconds
-                < u64::try_from(age).map_err(|_| {
-                    Error::new("STATE_CORRUPT", "Invalid installation log retention")
-                })?
-    };
-    // These workload fields control deletion and capture across the entire installation.
-    if changed {
-        require_instance_operations(principal)?;
-    }
-    Ok(())
+    crate::logs::validate_legacy_policy(old, new)
 }
 fn authorized_workload(
     store: &Store,
@@ -285,33 +254,125 @@ fn dispatch(
         AppCommand::Execution { id } => {
             encode(authorized_execution(store, p, &id, "execution.read")?)
         }
+        AppCommand::LogStorage => {
+            require_instance_operations(p)?;
+            if p.role != Role::Admin {
+                return Err(policy::denied());
+            }
+            encode(store.log_storage()?)
+        }
+        AppCommand::AlertStatus => {
+            require_instance_operations(p)?;
+            if p.role != Role::Admin {
+                return Err(policy::denied());
+            }
+            encode(store.alert_status()?)
+        }
+        AppCommand::AlertDeliveries { cursor, limit } => {
+            require_instance_operations(p)?;
+            if p.role != Role::Admin {
+                return Err(policy::denied());
+            }
+            encode(store.alert_deliveries(cursor, limit)?)
+        }
+        AppCommand::RetryAlert {
+            id,
+            idempotency_key,
+        } => {
+            require_instance_operations(p)?;
+            if p.role != Role::Admin {
+                return Err(policy::denied());
+            }
+            if let Some(value) = replay_alert_retry(store, p, &idempotency_key, digest)? {
+                return Ok(value);
+            }
+            operation(
+                store,
+                p,
+                &idempotency_key,
+                digest,
+                "alert_retry",
+                &id,
+                |store, operation| {
+                    store.retry_alert(&id, operation, crate::now_us())?;
+                    Ok(None)
+                },
+            )
+        }
+        AppCommand::SetLogStorage {
+            policy: input,
+            expected_revision,
+            idempotency_key,
+        } => {
+            require_instance_operations(p)?;
+            if p.role != Role::Admin {
+                return Err(policy::denied());
+            }
+            if let Some(value) = replay(store, p, &idempotency_key, digest)? {
+                return Ok(value);
+            }
+            let target = expected_revision
+                .checked_add(1)
+                .ok_or_else(|| Error::new("INPUT_INVALID", "Policy revision exhausted"))?
+                .to_string();
+            operation(
+                store,
+                p,
+                &idempotency_key,
+                digest,
+                "log_storage",
+                &target,
+                |s, _| {
+                    let result = s.set_log_storage_policy(&input, expected_revision)?;
+                    Ok(Some(encode(result)?))
+                },
+            )
+        }
+        AppCommand::LatestLogs {
+            attempt_id,
+            max_bytes,
+        } => {
+            let execution_id: String = store
+                .connection
+                .query_row(
+                    "SELECT execution_id FROM attempts WHERE id=?1",
+                    [&attempt_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or_else(missing)?;
+            authorized_execution(store, p, &execution_id, "logs.read")?;
+            encode(store.read_latest_log(&attempt_id, max_bytes)?)
+        }
+        AppCommand::LogInfo { attempt_id } => {
+            let execution_id: String = store
+                .connection
+                .query_row(
+                    "SELECT execution_id FROM attempts WHERE id=?1",
+                    [&attempt_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or_else(missing)?;
+            authorized_execution(store, p, &execution_id, "logs.read")?;
+            encode(store.log_info(&attempt_id)?)
+        }
         AppCommand::Logs {
             attempt_id,
             offset,
             max_bytes,
         } => {
-            if max_bytes == 0 || max_bytes > 65_536 {
-                return Err(input("Log byte limit must be between 1 and 65536"));
-            }
-            let (execution_id,truncated,terminal):(String,bool,bool)=store.connection.query_row("SELECT a.execution_id,COALESCE(l.truncated,0),a.state IN('SUCCEEDED','FAILED','TIMED_OUT','CANCELLED') FROM attempts a LEFT JOIN log_segments l ON l.attempt_id=a.id WHERE a.id=?1",[&attempt_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or_else(missing)?;
-            authorized_execution(store, p, &execution_id, "logs.read")?;
-            let path = store.log_path(&attempt_id)?;
-            let mut file = File::open(path).map_err(|_| {
-                Error::new(
-                    "LOG_UNAVAILABLE",
-                    "Log segment has expired or is unavailable",
+            let execution_id: String = store
+                .connection
+                .query_row(
+                    "SELECT execution_id FROM attempts WHERE id=?1",
+                    [&attempt_id],
+                    |r| r.get(0),
                 )
-            })?;
-            let (bytes, next_offset, response_truncated) =
-                log_window(&mut file, offset, max_bytes, terminal)?;
-            encode(LogDto {
-                attempt_id,
-                next_offset,
-                text: String::from_utf8_lossy(&bytes).into_owned(),
-                response_truncated,
-                log_truncated: truncated,
-                untrusted: true,
-            })
+                .optional()?
+                .ok_or_else(missing)?;
+            authorized_execution(store, p, &execution_id, "logs.read")?;
+            encode(store.read_log(&attempt_id, offset, max_bytes)?)
         }
         AppCommand::Preview { id, count } => {
             let (_, _, m) = authorized_workload(store, p, &id, "workload.read")?;
@@ -745,6 +806,7 @@ fn dispatch(
                     let tx = s.connection.savepoint()?;
                     tx.execute("UPDATE attempts SET state=?1,error_code='OPERATOR_RECONCILED',finished_at_us=?2 WHERE execution_id=?3 AND state='UNKNOWN'",params![state,now,execution_id])?;
                     tx.execute("UPDATE executions SET state=?1,finished_at_us=?2 WHERE id=?3 AND state='UNKNOWN'",params![state,now,execution_id])?;
+                    tx.execute("UPDATE log_streams SET capture_state='SEALED' WHERE capture_state='FROZEN' AND attempt_id IN(SELECT id FROM attempts WHERE execution_id=?1)",[&execution_id])?;
                     tx.execute("UPDATE service_instances SET observed_state='ABSENT',last_observed_at_us=?1 WHERE workload_id=?2 AND observed_state='UNKNOWN'",params![now,row.workload_id])?;
                     event(
                         &tx,
@@ -775,6 +837,12 @@ fn dispatch(
                 |r| r.get(0),
             )?;
             if actor != p.actor_id {
+                if operation.kind == "alert_retry" {
+                    require_instance_operations(p)?;
+                    if p.role != Role::Admin {
+                        return Err(policy::denied());
+                    }
+                }
                 policy::require(p, "operations.manage", None)?;
                 if !wildcard(p) {
                     match operation.kind.as_str() {
@@ -1125,7 +1193,7 @@ fn row_execution(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionDto> {
         log_truncated: r.get(11)?,
     })
 }
-const EXEC_SELECT: &str = "SELECT e.id,a.id,w.id,w.namespace,w.name,a.state,o.scheduled_at_us,a.started_at_us,a.finished_at_us,a.error_code,a.exit_code,COALESCE(l.truncated,0) FROM executions e JOIN attempts a ON a.execution_id=e.id JOIN workloads w ON w.id=e.workload_id LEFT JOIN occurrences o ON o.id=e.occurrence_id LEFT JOIN log_segments l ON l.attempt_id=a.id";
+const EXEC_SELECT: &str = "SELECT e.id,a.id,w.id,w.namespace,w.name,a.state,o.scheduled_at_us,a.started_at_us,a.finished_at_us,a.error_code,a.exit_code,COALESCE(l.truncated,0) FROM executions e JOIN attempts a ON a.execution_id=e.id JOIN workloads w ON w.id=e.workload_id LEFT JOIN occurrences o ON o.id=e.occurrence_id LEFT JOIN log_streams l ON l.attempt_id=a.id";
 fn execution(store: &Store, id: &str) -> Result<ExecutionDto> {
     store
         .connection
@@ -1223,6 +1291,33 @@ fn replay(store: &Store, p: &Principal, key: &str, digest: &str) -> Result<Optio
         ));
     }
     Ok(Some(encode(operation_dto(store, &id)?)?))
+}
+// Alert retries replay their original operation even when its one permitted send failed.
+fn replay_alert_retry(
+    store: &Store,
+    p: &Principal,
+    key: &str,
+    digest: &str,
+) -> Result<Option<Value>> {
+    let hash = format!("{:x}", Sha256::digest(key.as_bytes()));
+    let row: Option<(String, String)> = store
+        .connection
+        .query_row(
+            "SELECT id,request_digest FROM operations WHERE actor_id=?1 AND request_key_hash=?2",
+            params![p.actor_id, hash],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((id, old)) = row {
+        if old != digest {
+            return Err(Error::new(
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency key was already used with a different request",
+            ));
+        }
+        return Ok(Some(encode(operation_dto(store, &id)?)?));
+    }
+    Ok(None)
 }
 fn operation(
     store: &mut Store,
@@ -1502,46 +1597,4 @@ fn bind_service_operation(
         ],
     )?;
     Ok(())
-}
-
-fn trailing_incomplete_utf8(bytes: &[u8]) -> Option<usize> {
-    let mut offset = 0;
-    loop {
-        match std::str::from_utf8(&bytes[offset..]) {
-            Ok(_) => return None,
-            Err(error) => match error.error_len() {
-                Some(length) => offset += error.valid_up_to() + length,
-                None => return Some(offset + error.valid_up_to()),
-            },
-        }
-    }
-}
-fn log_window(
-    file: &mut File,
-    offset: u64,
-    max_bytes: u32,
-    terminal: bool,
-) -> Result<(Vec<u8>, u64, bool)> {
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|_| input("Invalid log offset"))?;
-    let mut bytes = Vec::new();
-    file.take(u64::from(max_bytes) + 4)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Error::new("LOG_UNAVAILABLE", "Cannot read log segment"))?;
-    let cap = usize::try_from(max_bytes).unwrap_or(65536);
-    let available = bytes.len();
-    let mut consumed = available.min(cap);
-    if max_bytes >= 4
-        && (!terminal || available > cap)
-        && let Some(start) = trailing_incomplete_utf8(&bytes[..consumed])
-    {
-        consumed = start;
-    }
-    let waiting = !terminal && trailing_incomplete_utf8(&bytes) == Some(consumed);
-    let response_truncated = available > consumed && !waiting;
-    bytes.truncate(consumed);
-    let next = offset
-        .checked_add(u64::try_from(consumed).map_err(|_| input("Invalid log offset"))?)
-        .ok_or_else(|| input("Invalid log offset"))?;
-    Ok((bytes, next, response_truncated))
 }

@@ -30,8 +30,9 @@ For Docker, use `docker compose -f compose.full.yaml up --build -d`, then bootst
 - Service desired/observed state, executable readiness/liveness probes, startup grace, thresholds, restart budgets/backoff and explicit operator restart.
 - Shared daemon authorization for CLI/REST/MCP, namespace and capability grants, hashed expiring/revocable tokens, bounded event history and audit queries, safe errors and owner-only Unix transport. Ordinary audit history is preserved without an automatic storage cap; only authentication rejection samples have bounded retention. See the [retention details](docs/RUNBOOK.md#secrets-and-log-budgets).
 - Authenticated REST/SSE and static dashboard hosting. Vue provides overview, jobs, services, editor, executions, logs, operations and settings with role-aware controls and reconnect recovery. MCP provides ten fixed observation tools through the official Rust SDK.
-- Shell-free native execution, bounded/redacted logs and retention. Docker requires an explicit private policy, pinned images and verified ownership labels; systemd controls only allowlisted existing units.
+- Shell-free native execution, bounded/redacted native rotation, one Admin-managed installation log policy, logical raw byte cursors and explicit UNKNOWN evidence freeze. Docker requires an explicit private policy, pinned images and verified ownership labels; systemd controls only allowlisted existing units. External logs remain bounded terminal snapshots.
 - Verified SQLite backups, offline restore quarantine, restored-token invalidation and explicit evidence/cutoff resume. Passive Cronicle reports classify unsupported/security-sensitive conversions and emit disabled proposals.
+- Optional HTTPS incident metadata, transactional bounded delivery history, stable IDs and service incident versions, explicit one-send retries and restore suppression. The application API owns durable receiver deduplication and Grokbot forwarding; [the integration contract](docs/api/WEBHOOKS.md) defines that handoff.
 - Generated TypeScript DTOs and workload JSON Schema, Core/API/Full image targets, hardened Compose/native service examples and CI configuration.
 
 ## Code map
@@ -42,6 +43,7 @@ For Docker, use `docker compose -f compose.full.yaml up --build -d`, then bootst
 | Shared command service and authorization | `src/application.rs`, `src/policy.rs` |
 | Scheduling, persistence and ownership | `src/scheduler.rs`, `src/store.rs`, `src/server.rs`, `migrations/` |
 | Native, probes and external execution | `src/process.rs`, `src/external.rs` |
+| Log storage and outbound alerts | `src/logs.rs`, `src/alerts.rs`, `src/webhooks.rs` |
 | Backup/restore and import | `src/ops.rs`, `src/importer.rs` |
 | CLI, REST/SSE and MCP | `src/cli.rs`, `src/api.rs`, `src/mcp.rs`, `docs/api/README.md` |
 | Dashboard | `web/dashboard/` |

@@ -2,7 +2,67 @@
 
 Recorded on 2026-11-07. These results describe the local source and disposable fixtures. They do not certify a production installation or replace the remaining release gates.
 
-## Executed checks
+## Log controls, rotation and outbound alerts — 2026-11-07–08
+
+The current change adds one installation log policy, opt-in native segment rotation and a durable HTTPS alert sender. It adds migrations 4 and 5; migrations 1–3 were compared byte-for-byte with the base commit and are unchanged. Configuration and receiver responsibilities are in [RUNBOOK.md](RUNBOOK.md) and [the webhook contract](api/WEBHOOKS.md). No production state, endpoint or credential was used.
+
+| Check | Executed evidence |
+|---|---|
+| Rust on macOS arm64 | `cargo test --locked --all-features --all-targets`: 231 passed, zero failed/ignored. Fresh format and all-target Clippy with warnings denied passed |
+| Rust on Linux aarch64 | Fresh Docker `checks` target: the same 231 tests and Clippy passed. Python/OpenSSL were added only to that test stage for disposable process/TLS fixtures |
+| Dashboard | Typecheck, all 62 unit tests and production build passed. The pinned Node 22 image independently ran the 62 tests and build; the host used Node 24.22.1 |
+| Browser/real transports | `test_full.py --browser` passed 29 first-pass scenarios plus the separate-origin scenario. The dedicated real owner-restart/freeze scenario passed through `test_log_rotation.py --browser`: 31 distinct Chromium scenarios in total. The suite mixes explicitly synthetic UI failures with real daemon/API journeys; it is not 31 independent live integrations |
+| Long-running rotation | Real service producing approximately 400 KB/s into a 128 KiB retained window, followed for 65 seconds with an additional manual fetch. Output kept advancing, there were no HTTP 429 responses, and combined expensive requests stayed within the fixture's limit of 35. Owner SIGKILL/restart produced UNKNOWN/FROZEN; retained hashes stayed fixed and an unsafe policy decrease was denied |
+| Cursor/redaction/restore | A numbered 390,889-byte producer retained 128,745 bytes from raw offset 262,144, within two segments. Secrets were absent; explicit expired offsets returned 409. Omitted offsets use one atomic retained-range read through REST/CLI/MCP. Metadata-only restore stayed paused and reported missing output as unavailable, with protected evidence and no fabricated EOF |
+| HTTPS alerts | `test_webhooks.py` passed against Full and Core+webhooks binaries: actual private-CA TLS/bearer authentication, final failure after retries, identical ID/body after receiver commit/lost acknowledgement/owner restart, durable receiver deduplication, service stop/recovery correlation, one idempotent manual retry, restore-held suppression and fresh post-resume UNKNOWN metadata |
+| Source/queue/network boundaries | Rust regressions cover source/enqueue rollback, retry/expiry/caps, terminal-history bounds, orphan manual operations, aged restore-held rows, destination retirement, strict persisted envelopes, private-address approvals, TLS failures, proxy/redirect behavior, response header bounds and bounded worker cancellation. Network validation does not depend on an Internet-accessible test endpoint |
+| Shared administration | Actual REST/CLI authorization, revision CAS/idempotency and accepted-versus-completed operations passed through the full acceptance script. Scoped Admin is denied global policy/alert administration; MCP retains its ten read-only tools |
+| Profiles | Independent Core, Core+webhooks, API and Full host builds passed feature isolation. Core rejects alert configuration before state/listener creation; Core+webhooks sends outbound without exposing TCP/MCP switches. Core/API/Full packaged-image help checks also passed |
+| Generated artifacts/repository | Fresh Rust DTO/schema exports were byte-identical to the intended generated files. All eight repository checks, Python script compilation and `git diff --check` passed |
+| Dependency/source hygiene | npm audit: zero known vulnerabilities in 130 dependencies. Official OSV batch lookup of all 270 locked Rust registry packages returned the existing `RUSTSEC-2024-0449` unmaintained `unsafe-libyaml` advisory through `serde_yaml_ng`, with no patched version. This is a maintenance issue, not evidence of an exploitable defect or a completed independent security audit. Gitleaks found no secrets in the intended tracked/new source inventory, excluding private state and build/dependency output |
+
+Independent specification and quality reviews found and helped reproduce failures before approval. Corrections include escaped descendants retaining log pipes, queue overflow during owner I/O, retention of unavailable evidence, late cancellation after verified exit, deletion before an outer result transaction committed, stale retained-range reads during rapid rotation, and stale diagnostic retry evidence after an attempt change. The final focused regression verifies diagnostic failures back off to 15 seconds; normal queued retries get a five-second check. Tests verify outcomes and durable records, rather than treating an accepted request as completion.
+
+### Packaged runtime evidence
+
+Fresh local Core/API/Full images built successfully on Linux aarch64. Their image IDs are local evidence, not published release references:
+
+- Core: `sha256:bf5ffc497ae425924b415b95303bc5eedffb2edba4e02dcab035f183862f6dd4`.
+- API: `sha256:4538727a5b46f5c54c032f46bfd32cb5537630eec526a5b1207e3aa0683cd755`.
+- Full: `sha256:225e03451b59b21dfd35159310416f04bc60720abd28878048aafd0b527a2a9d`.
+
+Core smoke verified nonroot/read-only operation, no published ports or Docker socket, second-owner denial, real scheduled output, bounded logs and restart history without duplicate occurrences. Full smoke verified the packaged dashboard, bearer requirement, local token bootstrap, authenticated status and packaged Docker client without a socket mount. A separate API smoke verified loopback health, bearer enforcement, authenticated status and disabled alerts when unconfigured. Disposable smoke containers/volumes were removed. The Core smoke used a temporary Compose image override, preserving existing development-image tags.
+
+`test_docker_executor.py` also passed against the explicitly selected disposable daemon and pinned Alpine image: opt-in policy, real owned container/output, terminal capture and cleanup, followed by daemon-outage UNKNOWN without automatic retry. No production Docker socket was used.
+
+### Slow/full storage observation
+
+`test_log_pressure.py` compared base commit `18ec9d6` and the current Full build on the same macOS arm64 host using private state. Every case produced 26,214,400 bytes, made 40 concurrent CLI/REST read samples and scheduled an unrelated due job. A temporary log-path-only interposer added 25 ms per write/sync; the failure cases returned ENOSPC without filling a real device.
+
+| Case | Maximum / mean read ms | Due-to-start ms | Injected writes / ENOSPC |
+|---|---:|---:|---:|
+| Base, slow | 75.10 / 38.13 | 28.54 | 257 / 0 |
+| Rolling, slow | 540.59 / 76.64 | 33.93 | 22 / 0 |
+| Base, full | 74.29 / 38.00 | 27.57 | 2 / 2 |
+| Rolling, full | 110.36 / 49.70 | 38.37 | 2 / 2 |
+
+The slow rolling capture stopped with `CAPTURE_BACKPRESSURE`, after saving 1,376,256 bytes and counting 24,838,144 discarded bytes; it retained a 131,072-byte suffix. The full rolling capture stopped with `LOG_STORAGE_FAILURE`, saved zero and counted all 26,214,400 bytes discarded. In both cases saved plus known discarded equaled produced bytes, the verified process still succeeded, and capture did not silently resume. Capture queue contention is separately covered at its 64-message/1 MiB slot limit. These observations show the owner remains responsive in this fixture, with worse read latency than the base under slow storage. They are not an internal loop-duration measurement, throughput promise or performance improvement. The simpler single-owner coordinator is retained; a stricter device-latency requirement would require a separately designed acknowledged writer protocol.
+
+### Boundaries still requiring external evidence
+
+The real application ingestion API and Grokbot are not implemented or deployed by this repository. The disposable receiver proves the publisher contract, not bot processing. CronHarbor cannot emit alerts while its own daemon/host is down; external monitoring remains necessary for that condition.
+
+Capture budgets cover tracked logical log-file bytes, not whole-filesystem allocation, SQLite/WAL, backups or executor-owned logs. Protected UNKNOWN/unavailable evidence may consume the budget and stop new capture. Native rotation is opt-in; external executors retain bounded terminal snapshots. Synchronous owner filesystem operations can still delay commands and dispatch on a sufficiently slow device; bounded reader queues stop capture instead of growing memory or silently resuming after loss. No production latency or resource improvement is claimed.
+
+Live main-API/Grokbot integration, production migration/load, live systemd, x86_64, physical disk exhaustion/corruption, power loss, OOM, independent security assessment, SBOM/signing and multi-architecture publication remain unexecuted. The isolated ENOSPC/slow-write fixture above does not replace those gates. Nothing was committed, pushed, deployed or published as part of these local checks.
+
+The reviewed implementation was transferred byte-for-byte into the normal checkout on `feature/log-controls-alerts`, preserving the pre-existing `.gitignore` edit and ignored planning documents. Repository checks, format, Full build, dashboard typecheck/tests/build were rerun there. Disposable Docker containers/volumes and CronHarbor/Vite processes were gone after verification; port 5185 had no listener. The dedicated Colima `cronharbor` profile is Stopped and the global Docker context remains `desktop-linux`.
+
+## Historical verification before log controls and alerts
+
+The sections below retain earlier evidence. Their 168 Rust / 56 unit / 24 browser counts, image IDs and then-unexecuted checks describe those earlier revisions; the dated section above is the current change's record.
+
+### Executed checks
 
 | Check | Actual evidence |
 |---|---|

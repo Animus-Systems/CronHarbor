@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 const props = defineProps<{
   open: boolean;
   title: string;
@@ -9,6 +9,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ cancel: []; confirm: [reason: string] }>();
 const dialog = ref<HTMLDialogElement>();
+const titleId = useId();
 const reason = ref("");
 let previousFocus: Element | null = null;
 watch(
@@ -33,12 +34,12 @@ onBeforeUnmount(() => {
 <template>
   <dialog
     ref="dialog"
-    aria-labelledby="confirm-title"
+    :aria-labelledby="titleId"
     @cancel.prevent="emit('cancel')"
   >
     <form @submit.prevent="emit('confirm', reason)">
       <p class="eyebrow">REVIEW ACTION</p>
-      <h2 id="confirm-title">{{ title }}</h2>
+      <h2 :id="titleId">{{ title }}</h2>
       <p class="muted">{{ impact }}</p>
       <label v-if="reasonRequired" class="field"
         >Reason and evidence<textarea

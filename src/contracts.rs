@@ -130,8 +130,209 @@ pub struct OperationDto {
     pub error_code: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertKind {
+    JobFailed,
+    JobTimedOut,
+    ExecutionUnknown,
+    ServiceUnhealthy,
+    ServiceFailed,
+    ServiceRecovered,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertSeverity {
+    Info,
+    Error,
+    Critical,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertConfigurationState {
+    Disabled,
+    Ready,
+    CredentialUnavailable,
+    WorkerUnavailable,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AlertDeliveryState {
+    Pending,
+    InFlight,
+    Delivered,
+    Failed,
+    Blocked,
+    Expired,
+    DestinationChanged,
+    RestoreHeld,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AlertErrorCode {
+    CredentialUnavailable,
+    TlsUnavailable,
+    InvalidDestination,
+    DnsUnavailable,
+    TransportUnavailable,
+    RequestTimeout,
+    HttpRejected,
+    RetryExhausted,
+    DeliveryExpired,
+    DestinationChanged,
+    ManualReceiptUnknown,
+    RestoreReplaySuppressed,
+    WorkerUnavailable,
+    InvalidPayload,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct AlertEnvelope {
+    pub schema_version: u32,
+    pub alert_id: String,
+    pub instance_id: String,
+    pub incident_id: String,
+    pub incident_version: u32,
+    pub kind: AlertKind,
+    pub severity: AlertSeverity,
+    #[ts(type = "number")]
+    pub occurred_at_us: i64,
+    #[ts(type = "number")]
+    pub incident_opened_at_us: i64,
+    pub workload_id: String,
+    pub namespace: String,
+    pub workload_name: String,
+    pub revision_id: String,
+    pub execution_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub error_code: Option<String>,
+    pub summary: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+pub struct AlertStatusDto {
+    pub configuration_state: AlertConfigurationState,
+    pub pending: u32,
+    pub in_flight: u32,
+    pub blocked: u32,
+    pub failed: u32,
+    pub outstanding: u32,
+    #[ts(type = "number | null")]
+    pub oldest_pending_at_us: Option<i64>,
+    #[ts(type = "number | null")]
+    pub last_acknowledged_at_us: Option<i64>,
+    #[ts(type = "number")]
+    pub queue_overflow_count: u64,
+    #[ts(type = "number")]
+    pub history_eviction_count: u64,
+    #[ts(type = "number")]
+    pub restore_suppressed_count: u64,
+    pub last_error_code: Option<AlertErrorCode>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+pub struct AlertDeliveryDto {
+    pub alert_id: String,
+    pub incident_id: String,
+    pub incident_version: u32,
+    pub kind: AlertKind,
+    pub workload_id: String,
+    pub workload_name: String,
+    pub namespace: String,
+    pub state: AlertDeliveryState,
+    pub attempt_count: u32,
+    #[ts(type = "number")]
+    pub occurred_at_us: i64,
+    #[ts(type = "number")]
+    pub created_at_us: i64,
+    #[ts(type = "number | null")]
+    pub next_attempt_at_us: Option<i64>,
+    #[ts(type = "number | null")]
+    pub finished_at_us: Option<i64>,
+    #[ts(type = "number | null")]
+    pub delivered_at_us: Option<i64>,
+    pub http_status: Option<u16>,
+    pub last_error_code: Option<AlertErrorCode>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LogCaptureMode {
+    Prefix,
+    Rolling,
+    ExternalSnapshot,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LogCaptureState {
+    Prepared,
+    Capturing,
+    Sealed,
+    Frozen,
+    Stopped,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct LogStoragePolicyInput {
+    #[ts(type = "number")]
+    pub max_disk_bytes: u64,
+    pub max_segments: u32,
+    #[ts(type = "number")]
+    pub retention_seconds: u64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+pub struct LogStoragePolicyDto {
+    // Upgrade provenance: legacy active-write and retention policy sets differed.
+    pub imported_conservative: bool,
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[ts(type = "number")]
+    pub max_disk_bytes: u64,
+    pub max_segments: u32,
+    #[ts(type = "number")]
+    pub retention_seconds: u64,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+pub struct LogStorageUsageDto {
+    #[ts(type = "number")]
+    pub retained_bytes: u64,
+    pub retained_segments: u32,
+    #[ts(type = "number")]
+    pub reserved_bytes: u64,
+    pub reserved_segments: u32,
+    #[ts(type = "number")]
+    pub protected_bytes: u64,
+    pub protected_segments: u32,
+    #[ts(type = "number")]
+    pub unexplained_bytes: u64,
+    pub unexplained_segments: u32,
+    pub capture_error_count: u32,
+    pub under_pressure: bool,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+pub struct LogStorageDto {
+    pub policy: LogStoragePolicyDto,
+    pub usage: LogStorageUsageDto,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+pub struct LogStreamDto {
+    pub attempt_id: String,
+    pub capture_mode: LogCaptureMode,
+    pub capture_state: LogCaptureState,
+    #[ts(type = "number")]
+    pub retained_from_offset: u64,
+    #[ts(type = "number")]
+    pub written_end_offset: u64,
+    #[ts(type = "number")]
+    pub retained_bytes: u64,
+    #[ts(type = "number")]
+    pub known_discarded_bytes: u64,
+    pub history_evicted: bool,
+    pub log_truncated: bool,
+    pub last_error_code: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct LogDto {
+    pub stream: LogStreamDto,
     pub attempt_id: String,
     pub text: String,
     pub response_truncated: bool,
@@ -223,6 +424,28 @@ pub enum AppCommand {
     },
     Execution {
         id: String,
+    },
+    LatestLogs {
+        attempt_id: String,
+        max_bytes: u32,
+    },
+    LogInfo {
+        attempt_id: String,
+    },
+    LogStorage,
+    AlertStatus,
+    AlertDeliveries {
+        cursor: Option<String>,
+        limit: u32,
+    },
+    RetryAlert {
+        id: String,
+        idempotency_key: String,
+    },
+    SetLogStorage {
+        policy: LogStoragePolicyInput,
+        expected_revision: u64,
+        idempotency_key: String,
     },
     Logs {
         attempt_id: String,
@@ -335,6 +558,21 @@ pub fn export_types(path: &std::path::Path) -> crate::Result<()> {
         StatusDto::decl(&ts_rs::Config::default()),
         ExecutionDto::decl(&ts_rs::Config::default()),
         OperationDto::decl(&ts_rs::Config::default()),
+        AlertKind::decl(&ts_rs::Config::default()),
+        AlertSeverity::decl(&ts_rs::Config::default()),
+        AlertConfigurationState::decl(&ts_rs::Config::default()),
+        AlertDeliveryState::decl(&ts_rs::Config::default()),
+        AlertErrorCode::decl(&ts_rs::Config::default()),
+        AlertEnvelope::decl(&ts_rs::Config::default()),
+        AlertStatusDto::decl(&ts_rs::Config::default()),
+        AlertDeliveryDto::decl(&ts_rs::Config::default()),
+        LogCaptureMode::decl(&ts_rs::Config::default()),
+        LogCaptureState::decl(&ts_rs::Config::default()),
+        LogStoragePolicyInput::decl(&ts_rs::Config::default()),
+        LogStoragePolicyDto::decl(&ts_rs::Config::default()),
+        LogStorageUsageDto::decl(&ts_rs::Config::default()),
+        LogStorageDto::decl(&ts_rs::Config::default()),
+        LogStreamDto::decl(&ts_rs::Config::default()),
         LogDto::decl(&ts_rs::Config::default()),
         EventDto::decl(&ts_rs::Config::default()),
         DiagnosticDto::decl(&ts_rs::Config::default()),

@@ -21,11 +21,11 @@ fn exercise(command: &str, args: &[&str], timeout: u64, cap: u64) -> cronharbor:
     store
         .start_requested(&launch.attempt_id, 60_000_000)
         .unwrap();
-    let mut process = RunningProcess::spawn(&launch, dir.path()).unwrap();
+    let mut process = RunningProcess::spawn(&launch, &mut store).unwrap();
     store.running(&launch, process.pid(), 60_000_000).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(outcome) = process.poll().unwrap() {
+        if let Some(outcome) = process.poll(&mut store).unwrap() {
             store.finish(&launch, &outcome, 61_000_000).unwrap();
             let bytes = std::fs::read(store.log_path(&launch.attempt_id).unwrap()).unwrap();
             assert!(bytes.len() <= usize::try_from(cap).unwrap());
@@ -62,7 +62,7 @@ fn a_real_process_with_a_lost_receipt_is_quarantined_on_restart() {
     store
         .start_requested(&launch.attempt_id, 60_000_000)
         .unwrap();
-    let process = RunningProcess::spawn(&launch, dir.path()).unwrap();
+    let process = RunningProcess::spawn(&launch, &mut store).unwrap();
     drop(store);
     // Allow bounded owner-lock handover while parallel subprocesses finish spawning.
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -91,7 +91,7 @@ fn a_missing_executable_has_a_durable_start_rejected_result() {
     store
         .start_requested(&launch.attempt_id, 60_000_000)
         .unwrap();
-    assert!(RunningProcess::spawn(&launch, dir.path()).is_err());
+    assert!(RunningProcess::spawn(&launch, &mut store).is_err());
     store
         .finish(
             &launch,
@@ -121,7 +121,7 @@ fn cancellation_escalates_when_the_child_ignores_term_and_reaps_it() {
     let mut store = Store::open(dir.path()).unwrap();
     store.apply(&manifest, 0).unwrap();
     let launch = store.claim_due(60_000_000).unwrap().unwrap();
-    let mut process = RunningProcess::spawn(&launch, dir.path()).unwrap();
+    let mut process = RunningProcess::spawn(&launch, &mut store).unwrap();
     let pid = Pid::from_raw(i32::try_from(process.pid()).unwrap());
     let deadline = Instant::now() + Duration::from_secs(5);
     while !ready.exists() {
@@ -134,7 +134,7 @@ fn cancellation_escalates_when_the_child_ignores_term_and_reaps_it() {
     let cancelled = Instant::now();
     process.cancel();
     let outcome = loop {
-        if let Some(outcome) = process.poll().unwrap() {
+        if let Some(outcome) = process.poll(&mut store).unwrap() {
             break outcome;
         }
         assert!(
@@ -159,7 +159,7 @@ fn dropping_a_running_process_terminates_and_reaps_its_child() {
     let mut store = Store::open(dir.path()).unwrap();
     store.apply(&manifest, 0).unwrap();
     let launch = store.claim_due(60_000_000).unwrap().unwrap();
-    let process = RunningProcess::spawn(&launch, dir.path()).unwrap();
+    let process = RunningProcess::spawn(&launch, &mut store).unwrap();
     let pid = Pid::from_raw(i32::try_from(process.pid()).unwrap());
     drop(process);
     assert_eq!(kill(pid, None), Err(Errno::ESRCH));

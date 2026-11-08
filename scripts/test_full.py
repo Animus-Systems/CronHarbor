@@ -222,8 +222,11 @@ def main():
             mcp_check(state, private / "observe.token")
 
             if options.browser:
+                browser_token = private / "browser-admin.token"
+                cli("tokens", "create", "--role", "admin", "--namespace", "*", "--capability", "*", "--output-file", str(browser_token))
                 environment = dict(os.environ, CRONHARBOR_DASHBOARD_URL=base,
-                                   CRONHARBOR_E2E_TOKEN_FILE=str(private / "admin.token"),
+                                   CRONHARBOR_E2E_PYTHON=os.sys.executable,
+                                   CRONHARBOR_E2E_TOKEN_FILE=str(browser_token),
                                    CRONHARBOR_E2E_VIEWER_TOKEN_FILE=str(private / "viewer.token"),
                                    CRONHARBOR_E2E_FILE_WORKLOAD=file_workload["id"], CRONHARBOR_E2E_REMOTE_URL="")
                 subprocess.run(["npm", "run", "e2e"], cwd=ROOT / "web/dashboard", env=environment, check=True, timeout=300)
@@ -238,7 +241,10 @@ def main():
                     except (OSError, urllib.error.URLError):
                         return False
                 wait(dashboard_ready)
-                environment.update(CRONHARBOR_DASHBOARD_URL=dashboard_origin, CRONHARBOR_E2E_REMOTE_URL=base + "/api/v1")
+                origin_token = private / "origin.token"
+                cli("tokens", "create", "--role", "admin", "--namespace", "*", "--capability", "*", "--output-file", str(origin_token))
+                environment.update(CRONHARBOR_DASHBOARD_URL=dashboard_origin, CRONHARBOR_E2E_REMOTE_URL=base + "/api/v1",
+                                   CRONHARBOR_E2E_TOKEN_FILE=str(origin_token))
                 subprocess.run(["npm", "run", "e2e", "--", "e2e/origin.spec.ts", "--reporter=list", "--output=test-results/origin"], cwd=ROOT / "web/dashboard", env=environment, check=True, timeout=90)
                 dashboard.terminate()
                 dashboard.wait(timeout=15)

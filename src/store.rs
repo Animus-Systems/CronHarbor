@@ -17,11 +17,13 @@ use crate::{
 
 pub(crate) const MIGRATION2: &str = include_str!("../migrations/0002_runtime.sql");
 pub(crate) const MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 pub(crate) const MIGRATIONS: &[(u32, &str)] = &[
     (1, MIGRATION),
     (2, MIGRATION2),
     (3, include_str!("../migrations/0003_auth_rejections.sql")),
+    (4, include_str!("../migrations/0004_log_streams.sql")),
+    (5, include_str!("../migrations/0005_alert_deliveries.sql")),
 ];
 pub const MAX_ACTIVE: i64 = 4;
 
@@ -30,6 +32,8 @@ pub struct Store {
     _owner: File,
     pub directory: PathBuf,
     last_auth_rejection: Option<Instant>,
+    pub(crate) alert_policy: crate::alerts::AlertCapturePolicy,
+    pub(crate) alert_worker_unavailable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +140,13 @@ pub fn private_directory(path: &Path) -> Result<PathBuf> {
 
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
+        Self::open_with_alerts(directory, None)
+    }
+    pub fn open_with_alerts(
+        directory: &Path,
+        alerts: Option<&crate::config::AlertConfig>,
+    ) -> Result<Self> {
+        let alert_policy = crate::alerts::AlertCapturePolicy::from_config(alerts)?;
         let directory = private_directory(directory)?;
         let owner = secure_file(&directory.join("owner.lock"))?;
         owner.try_lock().map_err(|_| {
@@ -251,6 +262,8 @@ impl Store {
             _owner: owner,
             directory,
             last_auth_rejection: None,
+            alert_policy,
+            alert_worker_unavailable: false,
         };
         if store.setting("instance_id")?.is_none() {
             store.set_setting("instance_id", &id())?;
@@ -286,6 +299,8 @@ impl Store {
             }
         }
         store.reconcile()?;
+        store.recover_alert_deliveries(crate::now_us())?;
+        store.recover_log_streams()?;
         Ok(store)
     }
     pub(crate) fn record_auth_rejection(&mut self) -> Result<()> {
@@ -356,6 +371,7 @@ impl Store {
         let now = crate::now_us();
         let restored = self.restore_required()?;
         let tx = self.connection.transaction()?;
+        crate::alerts::recover_manual_deliveries(&tx, now)?;
         tx.execute("UPDATE attempts SET state='UNKNOWN',error_code='RECONCILIATION_REQUIRED',finished_at_us=NULL WHERE state IN ('START_REQUESTED','RUNNING')",[])?;
         if restored {
             tx.execute("UPDATE attempts SET state='UNKNOWN',error_code='RESTORE_RECONCILIATION_REQUIRED',finished_at_us=NULL WHERE state IN ('CREATED','LAUNCH_INTENT_RECORDED')",[])?;
@@ -368,7 +384,7 @@ impl Store {
         tx.execute("UPDATE service_instances SET observed_state='ABSENT',next_action_at_us=NULL,last_observed_at_us=?1 WHERE observed_state='STARTING' AND workload_id IN(SELECT e.workload_id FROM executions e JOIN attempts a ON a.execution_id=e.id WHERE a.error_code='START_INTERRUPTED' AND a.state='CANCELLED') AND NOT EXISTS(SELECT 1 FROM executions e JOIN attempts a ON a.execution_id=e.id WHERE e.workload_id=service_instances.workload_id AND a.state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN'))",[now])?;
         tx.execute("UPDATE service_instances SET observed_state='UNKNOWN',last_observed_at_us=?1 WHERE workload_id IN(SELECT workload_id FROM executions WHERE state='UNKNOWN')",[now])?;
         tx.execute("UPDATE operations SET state='UNKNOWN',error_code='RECONCILIATION_REQUIRED',updated_at_us=?1 WHERE state='RUNNING' AND execution_id IN(SELECT id FROM executions WHERE state='UNKNOWN')",[now])?;
-        tx.execute("UPDATE operations SET state='FAILED',error_code='START_INTERRUPTED',updated_at_us=?1 WHERE state='ACCEPTED' AND id NOT IN(SELECT operation_id FROM manual_queue) AND operation_kind NOT IN('service_desired','service_restart')",[now])?;
+        tx.execute("UPDATE operations SET state='FAILED',error_code='START_INTERRUPTED',updated_at_us=?1 WHERE state='ACCEPTED' AND id NOT IN(SELECT operation_id FROM manual_queue) AND operation_kind NOT IN('service_desired','service_restart','alert_retry')",[now])?;
         tx.execute("UPDATE operations SET state='UNKNOWN',error_code='RECONCILIATION_REQUIRED',updated_at_us=?1 WHERE state IN('ACCEPTED','RUNNING') AND operation_kind IN('service_desired','service_restart') AND target_id IN(SELECT workload_id FROM service_instances WHERE observed_state='UNKNOWN')",[now])?;
         audit(&tx, "recovery.inspect", "instance", now)?;
         tx.commit()?;
@@ -378,8 +394,7 @@ impl Store {
         self.apply_scoped(manifest, "FILE", None, "local-owner", now)
     }
     pub fn log_disk_limit(&self) -> Result<u64> {
-        let value:i64=self.connection.query_row("SELECT COALESCE(MIN(COALESCE(json_extract(r.spec_json,'$.spec.logs.maxDiskBytes'),268435456)),268435456) FROM workloads w JOIN workload_revisions r ON r.id=w.current_revision_id WHERE w.deleted_at_us IS NULL",[],|r|r.get(0))?;
-        u64::try_from(value).map_err(|_| Error::new("STATE_CORRUPT", "Invalid global log budget"))
+        Ok(self.log_storage_policy()?.max_disk_bytes)
     }
     pub fn apply_scoped(
         &mut self,
@@ -401,22 +416,14 @@ impl Store {
         } else {
             None
         };
-        let current_budget = self.log_disk_limit()?;
-        let other_budget:Option<i64>=self.connection.query_row("SELECT MIN(COALESCE(json_extract(r.spec_json,'$.spec.logs.maxDiskBytes'),268435456)) FROM workloads w JOIN workload_revisions r ON r.id=w.current_revision_id WHERE w.deleted_at_us IS NULL AND (w.namespace!=?1 OR w.name!=?2)",params![manifest.metadata.namespace,manifest.metadata.name],|r|r.get(0))?;
-        let proposed_budget = manifest.spec.logs.max_disk_bytes.min(
-            other_budget
-                .and_then(|v| u64::try_from(v).ok())
-                .unwrap_or(manifest.spec.logs.max_disk_bytes),
-        );
-        if proposed_budget < current_budget {
-            let active:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN'))",[],|r|r.get(0))?;
-            if active {
-                return Err(Error::new(
-                    "STATE_CONFLICT",
-                    "Drain active attempts and reconcile UNKNOWN before lowering the global log budget",
-                ));
-            }
-        }
+        let old = self
+            .manifest_for(&format!(
+                "{}/{}",
+                manifest.metadata.namespace, manifest.metadata.name
+            ))
+            .ok()
+            .map(|row| row.2);
+        crate::logs::validate_legacy_policy(old.as_ref(), manifest)?;
         let tx = self.connection.savepoint()?;
         let existing:Option<(String,String,Option<String>)>=tx.query_row("SELECT id,source_kind,current_revision_id FROM workloads WHERE namespace=?1 AND name=?2",params![manifest.metadata.namespace,manifest.metadata.name],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let workload = match existing {
@@ -708,7 +715,7 @@ impl Store {
             "UPDATE executions SET state='RUNNING' WHERE id=?1",
             [&launch.execution_id],
         )?;
-        tx.execute("INSERT INTO log_segments(id,attempt_id,relative_path,created_at_us) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM log_segments WHERE attempt_id=?2)",params![id(),launch.attempt_id,format!("logs/{}.log",launch.attempt_id),now])?;
+        crate::logs::ensure_stream(&tx, launch, now)?;
         if launch.manifest.kind == "Service" {
             tx.execute("UPDATE service_instances SET observed_state='STARTING',external_handle_json=?1,last_observed_at_us=?2 WHERE workload_id=(SELECT workload_id FROM executions WHERE id=?3)",params![handle,now,launch.execution_id])?;
         }
@@ -760,8 +767,6 @@ impl Store {
         outcome: &crate::process::Outcome,
         now: i64,
     ) -> Result<()> {
-        let bytes = i64::try_from(outcome.log_bytes)
-            .map_err(|_| Error::new("INPUT_INVALID", "Log size exceeds database range"))?;
         let tx = self.connection.savepoint()?;
         let state = outcome.state.as_str();
         let finished = if state == "UNKNOWN" { None } else { Some(now) };
@@ -776,7 +781,7 @@ impl Store {
             "UPDATE executions SET state=?1,finished_at_us=?2 WHERE id=?3",
             params![state, finished, launch.execution_id],
         )?;
-        tx.execute("UPDATE log_segments SET bytes_written=?1,truncated=?2,closed_at_us=?3 WHERE attempt_id=?4",params![bytes,outcome.log_truncated,now,launch.attempt_id])?;
+        crate::logs::finish_stream(&tx, &launch.attempt_id, outcome, now)?;
         if launch.manifest.kind == "Service" {
             service_finished(&tx, launch, state, outcome.error_code, now)?;
         } else {
@@ -806,6 +811,7 @@ impl Store {
             }
         }
         tx.execute("UPDATE operations SET state=?1,error_code=?2,updated_at_us=?3 WHERE target_id=?4 AND operation_kind='cancel' AND state IN('ACCEPTED','RUNNING')",params![if state=="UNKNOWN"{"UNKNOWN"}else{"SUCCEEDED"},outcome.error_code,now,launch.execution_id])?;
+        crate::alerts::capture_result(&tx, &self.alert_policy, &launch.attempt_id, now)?;
         event(
             &tx,
             "execution.result",
@@ -833,7 +839,9 @@ impl Store {
             },
             now,
         )?;
-        self.retain_logs_at(now)?;
+        if self.connection.is_autocommit() {
+            self.retain_logs_at(now)?;
+        }
         Ok(())
     }
     pub fn attempt_is_unknown(&self, attempt: &str) -> Result<bool> {
@@ -921,6 +929,12 @@ impl Store {
                 tx.execute("UPDATE operations SET state='SUCCEEDED',updated_at_us=?1 WHERE target_id=?2 AND operation_kind IN('service_desired','service_restart') AND state IN('ACCEPTED','RUNNING') AND json_extract(result_json,'$.desired_state')='RUNNING' AND json_extract(result_json,'$.revision_id')=(SELECT revision_id FROM executions WHERE id=?3) AND (operation_kind!='service_restart' OR created_at_us<=(SELECT created_at_us FROM executions WHERE id=?3))",params![now,workload,launch.execution_id])?;
             }
         }
+        let workload: String = tx.query_row(
+            "SELECT workload_id FROM executions WHERE id=?1",
+            [&launch.execution_id],
+            |r| r.get(0),
+        )?;
+        crate::alerts::capture_service(&tx, &self.alert_policy, &workload, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -940,7 +954,7 @@ impl Store {
     ) -> Result<()> {
         self.connection.execute_batch("SAVEPOINT external_result")?;
         let result = (|| {
-            self.connection.execute("INSERT INTO log_segments(id,attempt_id,relative_path,created_at_us) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM log_segments WHERE attempt_id=?2)",params![id(),launch.attempt_id,format!("logs/{}.log",launch.attempt_id),now])?;
+            crate::logs::ensure_stream(&self.connection, launch, now)?;
             self.finish(launch, outcome, now)?;
             if logs_persisted && outcome.state != crate::process::EndState::Unknown {
                 self.queue_external_cleanup(&launch.attempt_id, handle)?;
@@ -950,7 +964,7 @@ impl Store {
         match result {
             Ok(()) => {
                 self.connection.execute_batch("RELEASE external_result")?;
-                Ok(())
+                self.retain_logs_at(now)
             }
             Err(error) => {
                 self.connection
@@ -1040,7 +1054,7 @@ impl Store {
         )?)
     }
     pub fn history(&self) -> Result<Vec<History>> {
-        let mut q=self.connection.prepare("SELECT e.id,a.id,w.namespace,w.name,a.state,COALESCE(o.scheduled_at_us,e.created_at_us),a.error_code,a.exit_code,COALESCE(l.truncated,0) FROM executions e JOIN attempts a ON a.execution_id=e.id JOIN workloads w ON w.id=e.workload_id LEFT JOIN occurrences o ON o.id=e.occurrence_id LEFT JOIN log_segments l ON l.attempt_id=a.id ORDER BY e.created_at_us DESC,e.id DESC,a.attempt_index DESC LIMIT 100")?;
+        let mut q=self.connection.prepare("SELECT e.id,a.id,w.namespace,w.name,a.state,COALESCE(o.scheduled_at_us,e.created_at_us),a.error_code,a.exit_code,COALESCE(l.truncated,0) FROM executions e JOIN attempts a ON a.execution_id=e.id JOIN workloads w ON w.id=e.workload_id LEFT JOIN occurrences o ON o.id=e.occurrence_id LEFT JOIN log_streams l ON l.attempt_id=a.id ORDER BY e.created_at_us DESC,e.id DESC,a.attempt_index DESC LIMIT 100")?;
         Ok(q.query_map([], |r| {
             Ok(History {
                 execution_id: r.get(0)?,
@@ -1060,94 +1074,13 @@ impl Store {
         Ok(Status{sqlite_version:rusqlite::version().into(),workloads:self.connection.query_row("SELECT count(*) FROM workloads",[],|r|r.get(0))?,active:self.connection.query_row("SELECT count(*) FROM attempts WHERE state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN')",[],|r|r.get(0))?,unknown:self.connection.query_row("SELECT count(*) FROM attempts WHERE state='UNKNOWN'",[],|r|r.get(0))?,paused:paused||self.paused()?})
     }
     pub fn log_path(&self, attempt: &str) -> Result<PathBuf> {
-        let path: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT relative_path FROM log_segments WHERE attempt_id=?1",
-                [attempt],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let path = path.ok_or_else(|| {
-            Error::new("LOG_UNAVAILABLE", "Logs are not available for this attempt")
-        })?;
-        if path != format!("logs/{attempt}.log") || uuid::Uuid::parse_str(attempt).is_err() {
-            return Err(Error::new("STATE_CORRUPT", "Invalid log path"));
-        }
-        let full = self.directory.join(path);
-        check_existing(&full)?;
-        Ok(full)
+        self.legacy_log_path(attempt)
     }
     pub fn retain_logs(&self) -> Result<()> {
         self.retain_logs_at(crate::now_us())
     }
     fn retain_logs_at(&self, now: i64) -> Result<()> {
-        let policies = {
-            let mut q=self.connection.prepare("SELECT r.spec_json FROM workloads w JOIN workload_revisions r ON r.id=w.current_revision_id")?;
-            q.query_map([], |r| r.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let mut bytes_cap = self.log_disk_limit()?;
-        let mut segments_cap = 1024;
-        let mut age_cap = 604800;
-        for json in policies {
-            let m = Manifest::parse(&json)?;
-            bytes_cap = bytes_cap.min(m.spec.logs.max_disk_bytes);
-            segments_cap = segments_cap.min(m.spec.logs.max_segments);
-            age_cap = age_cap.min(m.spec.logs.retention_seconds);
-        }
-        let closed = {
-            let mut q=self.connection.prepare("SELECT l.id,l.relative_path,l.bytes_written,l.created_at_us FROM log_segments l JOIN attempts a ON a.id=l.attempt_id JOIN executions e ON e.id=a.execution_id WHERE l.closed_at_us IS NOT NULL AND a.state IN('SUCCEEDED','FAILED','TIMED_OUT','CANCELLED') AND e.state!='UNKNOWN' ORDER BY l.created_at_us,l.id")?;
-            q.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let mut total: i64 = self.connection.query_row(
-            "SELECT COALESCE(SUM(bytes_written),0) FROM log_segments",
-            [],
-            |r| r.get(0),
-        )?;
-        let mut count: u32 =
-            self.connection
-                .query_row("SELECT count(*) FROM log_segments", [], |r| r.get(0))?;
-        for (segment, path, bytes, created) in closed {
-            if total <= i64::try_from(bytes_cap).unwrap_or(i64::MAX)
-                && count <= segments_cap
-                && now.saturating_sub(created)
-                    <= i64::try_from(age_cap)
-                        .unwrap_or(i64::MAX)
-                        .saturating_mul(1_000_000)
-            {
-                break;
-            }
-            let full = self.directory.join(&path);
-            if path.starts_with("logs/")
-                && full.parent() == Some(self.directory.join("logs").as_path())
-            {
-                check_existing(&full)?;
-                match fs::remove_file(&full) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => {
-                        return Err(Error::new(
-                            "STORAGE_UNAVAILABLE",
-                            "Cannot enforce log retention",
-                        ));
-                    }
-                };
-                self.connection
-                    .execute("DELETE FROM log_segments WHERE id=?1", [segment])?;
-                total = total.saturating_sub(bytes);
-                count = count.saturating_sub(1);
-            }
-        }
-        Ok(())
+        self.retain_log_segments(now, 0, 0)
     }
     pub fn backup(&mut self, name: &str) -> Result<serde_json::Value> {
         let result = crate::ops::backup(
@@ -1215,6 +1148,7 @@ impl Store {
         )?;
         tx.execute("INSERT INTO restore_quarantine(id,backup_at_us,cutoff_us,evidence,unresolved_attempts,created_at_us) VALUES(?1,?2,?3,?4,?5,?6)",params![id(),marker.backup_at_us,cutoff,evidence,unknown,crate::now_us()])?;
         tx.execute("UPDATE runtime_settings SET value='false' WHERE key IN('restore_required','global_paused')",[])?;
+        Self::suppress_restored_alerts(&tx, crate::now_us())?;
         audit_actor(
             &tx,
             actor,

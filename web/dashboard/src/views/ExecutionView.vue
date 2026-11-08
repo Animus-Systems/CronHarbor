@@ -39,10 +39,14 @@ const cancelCapability = computed(() => {
 const loading = ref(true);
 const error = ref("");
 const diagnosticError = ref("");
+const diagnosticLoading = ref(false);
+const diagnosticFetchedAt = ref<number>();
 const action = ref("");
 const reconcileState = ref("FAILED");
 let stopped = false;
 let fetching = false;
+let diagnosticReadAt = Number.NEGATIVE_INFINITY;
+let diagnosticFailures = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
 const unknown = computed(
   () => execution.value?.state.toLowerCase() === "unknown",
@@ -58,7 +62,7 @@ const terminal = computed(() =>
     "skipped",
   ].includes(execution.value?.state.toLowerCase() ?? ""),
 );
-async function load(): Promise<void> {
+async function load(forceDiagnostic = false): Promise<void> {
   if (fetching || stopped) return;
   fetching = true;
   if (timer) clearTimeout(timer);
@@ -67,7 +71,15 @@ async function load(): Promise<void> {
       .client()
       .get(`/executions/${encodeURIComponent(id)}`, isExecution);
     if (stopped) return;
+    const changed = execution.value === undefined || execution.value.attempt_id !== result.attempt_id || execution.value.state !== result.state;
     execution.value = result;
+    if (changed) {
+      diagnostic.value = undefined;
+      diagnosticFetchedAt.value = undefined;
+      diagnosticError.value = "";
+      diagnosticFailures = 0;
+      diagnosticReadAt = Number.NEGATIVE_INFINITY;
+    }
     error.value = "";
     if (!targetWorkload.value && d.can("workload.read", result.workload_id)) {
       try {
@@ -81,16 +93,27 @@ async function load(): Promise<void> {
         fetchedWorkload.value = undefined;
       }
     }
-    try {
-      const result = await d
-        .client()
-        .get(`/diagnostics/${encodeURIComponent(id)}`, isDiagnostic);
-      if (!stopped) {
-        diagnostic.value = result;
-        diagnosticError.value = "";
+    // Share the API's expensive-query budget with log following.
+    const cadence = diagnosticFailures < 2 && (retryPending.value || diagnosticFailures === 1) ? 5000 : 15000;
+    if (forceDiagnostic || changed || performance.now() - diagnosticReadAt >= cadence) {
+      diagnosticReadAt = performance.now();
+      diagnosticLoading.value = true;
+      try {
+        const result = await d.client().get(`/diagnostics/${encodeURIComponent(id)}`, isDiagnostic);
+        if (!stopped) {
+          diagnostic.value = result;
+          diagnosticFetchedAt.value = Date.now() * 1000;
+          diagnosticError.value = "";
+          diagnosticFailures = 0;
+        }
+      } catch (caught) {
+        if (!stopped) {
+          diagnosticError.value = formatError(caught);
+          diagnosticFailures = Math.min(2, diagnosticFailures + 1);
+        }
+      } finally {
+        diagnosticLoading.value = false;
       }
-    } catch (caught) {
-      diagnosticError.value = formatError(caught);
     }
   } catch (caught) {
     error.value = formatError(caught);
@@ -275,7 +298,9 @@ async function confirm(reason: string): Promise<void> {
             <h2>Deterministic diagnostics</h2>
             <p>Observations and hypotheses kept separate</p>
           </div>
+          <button :disabled="diagnosticLoading || !d.connected.value" @click="load(true)">Refresh diagnostics</button>
         </div>
+        <p v-if="diagnosticFetchedAt" class="hint">Bounded refresh · last retrieved {{ time(diagnosticFetchedAt) }}.</p>
         <p v-if="diagnosticError" class="message warning">
           {{ diagnosticError }}
         </p>
@@ -310,7 +335,6 @@ async function confirm(reason: string): Promise<void> {
       :execution-id="execution.execution_id"
       :attempt-id="execution.attempt_id"
       :workload-id="execution.workload_id"
-      :terminal="terminal"
     />
     <section class="panel">
       <div class="panel-heading">

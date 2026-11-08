@@ -5,7 +5,7 @@ use cronharbor::{
     process::{EndState, Outcome},
     store::{Launch, Store},
 };
-use std::{io::Write, os::unix::fs::PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 fn setup(kind: &str) -> (tempfile::TempDir, Store, Manifest) {
     let directory = tempfile::tempdir().unwrap();
@@ -98,8 +98,16 @@ fn cancel_during_retry_backoff_finalizes_execution_without_rewriting_failed_atte
 #[test]
 fn unresolved_closed_logs_survive_retention_and_still_count_toward_budget() {
     let (directory, mut store, mut manifest) = setup("OneShotJob");
-    manifest.spec.logs.max_disk_bytes = 4096;
-    manifest.spec.logs.max_segments = 1;
+    store
+        .set_log_storage_policy(
+            &cronharbor::contracts::LogStoragePolicyInput {
+                max_disk_bytes: 4096,
+                max_segments: 1,
+                retention_seconds: 604800,
+            },
+            1,
+        )
+        .unwrap();
     store.apply(&manifest, 0).unwrap();
     call(
         &mut store,
@@ -111,12 +119,10 @@ fn unresolved_closed_logs_survive_retention_and_still_count_toward_budget() {
     let unknown = store.claim_due(1).unwrap().unwrap();
     store.start_requested(&unknown.attempt_id, 1).unwrap();
     store.running(&unknown, 1, 1).unwrap();
-    let logs = cronharbor::store::private_directory(&directory.path().join("logs")).unwrap();
     let evidence = vec![b'e'; 4096];
-    cronharbor::store::secure_file(&logs.join(format!("{}.log", unknown.attempt_id)))
-        .unwrap()
-        .write_all(&evidence)
-        .unwrap();
+    store.prepare_log_capture(&unknown).unwrap();
+    store.append_log(&unknown, &evidence).unwrap();
+    store.freeze_log_capture(&unknown.attempt_id).unwrap();
     finish(&mut store, &unknown, EndState::Unknown, 4096, 2);
     manifest.metadata.name = "other".into();
     store.apply(&manifest, 3).unwrap();
@@ -130,17 +136,10 @@ fn unresolved_closed_logs_survive_retention_and_still_count_toward_budget() {
     let other = store.claim_due(3).unwrap().unwrap();
     store.start_requested(&other.attempt_id, 3).unwrap();
     store.running(&other, 1, 3).unwrap();
-    let mut other_log =
-        cronharbor::store::secure_file(&logs.join(format!("{}.log", other.attempt_id))).unwrap();
-    let (written, truncated) = cronharbor::process::write_log_chunk(
-        &mut other_log,
-        &logs,
-        store.log_disk_limit().unwrap(),
-        b"new output",
-    )
-    .unwrap();
-    assert_eq!(written, 0);
-    assert!(truncated);
+    assert_eq!(
+        store.prepare_log_capture(&other).unwrap_err().code,
+        "LOG_STORAGE_PRESSURE"
+    );
     finish(&mut store, &other, EndState::Succeeded, 0, 4);
     assert_eq!(
         std::fs::read(store.log_path(&unknown.attempt_id).unwrap()).unwrap(),
@@ -166,8 +165,20 @@ fn unresolved_closed_logs_survive_retention_and_still_count_toward_budget() {
             idempotency_key: "reconcile".into(),
         },
     );
-    manifest.spec.logs.retention_seconds = 1;
-    store.apply(&manifest, 5).unwrap();
+    let database = rusqlite::Connection::open(directory.path().join("state.db")).unwrap();
+    database
+        .execute("UPDATE log_segments SET created_at_us=1", [])
+        .unwrap();
+    store
+        .set_log_storage_policy(
+            &cronharbor::contracts::LogStoragePolicyInput {
+                max_disk_bytes: 4096,
+                max_segments: 1,
+                retention_seconds: 1,
+            },
+            2,
+        )
+        .unwrap();
     store.retain_logs().unwrap();
     assert_eq!(
         store.log_path(&unknown.attempt_id).unwrap_err().code,

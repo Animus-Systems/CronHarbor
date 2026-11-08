@@ -45,12 +45,12 @@ fn restored_snapshot_never_replays_post_backup_effects_under_any_misfire_policy(
         store
             .start_requested(&launch.attempt_id, cronharbor::now_us())
             .unwrap();
-        let mut process = RunningProcess::spawn(&launch, &state).unwrap();
+        let mut process = RunningProcess::spawn(&launch, &mut store).unwrap();
         store
             .running(&launch, process.pid(), cronharbor::now_us())
             .unwrap();
         loop {
-            if let Some(outcome) = process.poll().unwrap() {
+            if let Some(outcome) = process.poll(&mut store).unwrap() {
                 assert_eq!(outcome.state, EndState::Succeeded);
                 store
                     .finish(&launch, &outcome, cronharbor::now_us())

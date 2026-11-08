@@ -9,7 +9,8 @@ description = "Single-node scheduler and service control plane"
 
 [features]
 default = []
-api = ["dep:axum", "dep:tokio", "dep:tokio-stream", "dep:tower", "dep:tower-http"]
+api = ["dep:axum", "dep:tokio", "dep:tokio-stream", "dep:tower", "dep:tower-http", "webhooks"]
+webhooks = ["dep:reqwest", "dep:tokio", "dep:rustls"]
 mcp = ["dep:rmcp", "dep:tokio"]
 full = ["api", "mcp"]
 
@@ -29,11 +30,13 @@ uuid = { version = "1", features = ["v4"] }
 ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 schemars = { version = "1", features = ["derive"] }
 axum = { version = "0.8.9", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "io-std", "io-util"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal", "io-std", "io-util"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 tower = { version = "0.5", features = ["util", "limit", "timeout"], optional = true }
 tower-http = { version = "0.6", features = ["cors", "fs", "limit", "set-header"], optional = true }
 rmcp = { version = "3.9.0", features = ["server", "macros", "schemars", "transport-io"], optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { isLog } from "../src/guards";
 import type { LogDto } from "../src/generated/contracts";
+import { logStream } from "./log-fixtures";
 describe("raw log cursors", () => {
   const log: LogDto = {
+    stream: logStream("attempt", 5),
     attempt_id: "attempt",
     text: "\uFFFD😀",
     next_offset: 5,

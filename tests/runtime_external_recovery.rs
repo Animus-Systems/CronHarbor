@@ -219,7 +219,6 @@ fn systemd_result_controls_recovered_terminal_outcome() {
         let mut manifest = Manifest::parse(include_str!("../examples/hello.yaml")).unwrap();
         manifest.kind = "OneShotJob".into();
         manifest.spec.timeout_seconds = 300;
-        manifest.spec.logs.retention_seconds = 1;
         manifest.spec.execution.adapter = "systemd".into();
         manifest.spec.execution.command.clear();
         manifest.spec.execution.args.clear();
@@ -229,6 +228,16 @@ fn systemd_result_controls_recovered_terminal_outcome() {
             unit: "worker.service".into(),
         });
         let mut store = Store::open(&state).unwrap();
+        store
+            .set_log_storage_policy(
+                &cronharbor::contracts::LogStoragePolicyInput {
+                    max_disk_bytes: 268435456,
+                    max_segments: 1024,
+                    retention_seconds: 1,
+                },
+                1,
+            )
+            .unwrap();
         store.apply(&manifest, cronharbor::now_us()).unwrap();
         application::execute(
             &mut store,
@@ -310,7 +319,7 @@ esac
             let database = rusqlite::Connection::open(state.join("state.db")).unwrap();
             let bytes: i64 = database
                 .query_row(
-                    "SELECT bytes_written FROM log_segments WHERE attempt_id=?1",
+                    "SELECT bytes_written FROM log_segments WHERE stream_id=(SELECT id FROM log_streams WHERE attempt_id=?1)",
                     [&launch.attempt_id],
                     |row| row.get(0),
                 )
@@ -318,7 +327,7 @@ esac
             assert_eq!(bytes, 19);
             database
                 .execute(
-                    "UPDATE log_segments SET created_at_us=1 WHERE attempt_id=?1",
+                    "UPDATE log_segments SET created_at_us=1 WHERE stream_id=(SELECT id FROM log_streams WHERE attempt_id=?1)",
                     [&launch.attempt_id],
                 )
                 .unwrap();

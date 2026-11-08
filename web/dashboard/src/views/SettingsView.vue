@@ -7,6 +7,8 @@ import type { AuditDto, Role, TokenDto } from "../generated/contracts";
 import { time } from "../format";
 import AdapterHealth from "../components/AdapterHealth.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
+import LogStorage from "../components/LogStorage.vue";
+import AlertDeliveries from "../components/AlertDeliveries.vue";
 const tokens = ref<TokenDto[]>([]);
 const tokenCursor = ref<string | null>(null);
 const audit = ref<AuditDto[]>([]);
@@ -225,8 +227,8 @@ async function copySecret(): Promise<void> {
       </dl>
       <div class="panel-content">
         <p class="hint">
-          Retention, backup, restore and executor allowlists are administered
-          through deployment configuration and the trusted CLI. Verify backups
+          Log retention is controlled by the installation policy below. Backup,
+          restore and executor allowlists use the trusted CLI and deployment configuration. Verify backups
           before restoring; restoring requires explicit side-effect
           reconciliation.
         </p>
@@ -418,6 +420,8 @@ async function copySecret(): Promise<void> {
       </div>
     </section>
   </template>
+  <LogStorage v-if="canAudit" />
+  <AlertDeliveries v-if="canAudit" />
   <p v-if="!canAudit" class="message warning">
     Instance-wide audit requires operations.manage and wildcard namespace
     authority.

@@ -52,7 +52,30 @@ T-021 failure drill: take backup at B, execute a side-effecting job successfully
 
 Run `python3 scripts/check_repository.py` from the repository root. It uses Python's standard library to apply the actual SQL migrations in memory, exercise positive and negative relationship fixtures, check the inclusive grace constraint, and verify maintained documentation links. These checks do not require the original design folder. They do not replace Rust lifecycle tests, real transports, browser journeys, or deployment acceptance drills.
 
+## HTTPS response parsing bound
+
+The outbound worker pins reqwest 0.13.5 to HTTP/1, 64 response fields, one request at a time, no pooling or automatic redirects/retries, and a ten-second request deadline. It discards response bodies. Field count alone is not an aggregate byte bound.
+
+For the locked [hyper 1.12.0 buffer implementation](https://github.com/hyperium/hyper/blob/v1.12.0/src/proto/h1/io.rs), let `M = 417792`. Reservations are limited by `M - len`, but reads expose the buffer's spare capacity and parsing checks for a complete header before applying the nominal limit. Therefore `M` is not a strict accepted-header threshold. The TLS fixture observed a complete 417,793-byte header accepted and a 600,000-byte header rejected; these sizes are regression evidence, not a configurable public threshold.
+
+The conservative bound is derived from pinned [bytes 1.12.1 reservation branches](https://github.com/tokio-rs/bytes/blob/v1.12.1/src/bytes_mut.rs) and [Rust 1.99.1 Vec growth](https://github.com/rust-lang/rust/blob/1.99.1/library/alloc/src/raw_vec/mod.rs). If growth is needed with consumed prefix `off < len`, old capacity is below `off + M < 2M`; otherwise storage is reclaimed or old capacity is below `M`. Doubling keeps the new backing capacity below `4M = 1671168`, hence below 2 MiB. The shared unique branch reclaims or follows the same bound; the shared nonunique branch allocates for current length plus the bounded addition or the encoded original capacity, rounded down. This includes consumed-prefix handling after informational responses.
+
+This is a bound on a single parser backing buffer for this pinned client configuration, not total process RSS, allocator overhead or all bytes received over a request's lifetime. The request deadline and single-worker admission bound ongoing traffic. Dependency or client-setting changes require reviewing this derivation and rerunning oversized-header and cancellation tests. A custom TLS implementation is unnecessary.
+
 ## Performance profiles
+
+The logging fixtures use private disposable state and an explicitly selected binary:
+
+```sh
+CRONHARBOR_BINARY=/absolute/path/to/full-binary python3 scripts/test_log_rotation.py
+CRONHARBOR_BINARY=/absolute/path/to/full-binary python3 scripts/test_log_rotation.py --browser
+CRONHARBOR_BINARY=/absolute/path/to/full-binary python3 scripts/test_webhooks.py
+CRONHARBOR_BINARY=/absolute/path/to/full-binary python3 scripts/test_full.py --browser
+CRONHARBOR_BASELINE_BINARY=/absolute/path/to/baseline-full-binary \
+  CRONHARBOR_BINARY=/absolute/path/to/full-binary python3 scripts/test_log_pressure.py
+```
+
+The pressure comparison currently requires macOS and Clang. It compiles a temporary interposer that delays writes/syncs only under each disposable daemon's log directory and injects `ENOSPC` on selected log writes in the failure cases. It runs the same producer, concurrent CLI/REST reads and unrelated due job against the selected baseline and rolling builds. Its read latency is an owner responsiveness observation, not a direct internal loop timer or a production latency guarantee. Queue capacity/drain ordering is measured separately by the capture contention regression. This models storage failures without filling or mounting a filesystem; physical device and power-loss behavior remain separate gates.
 
 - **P0:** no jobs/services; API/MCP off; 5 warm steady-state 10-minute samples on pinned Linux host; RSS, PSS, CPU by cgroup, DB size, startup; target hypotheses ≤30 MiB RSS and ≤0.5% one CPU equivalent. Report confidence, not invented guarantee.
 - **P1:** 100 and 1,000 schedules; no active external processes; measure planning allocations, p95 due-to-dispatch and timer drift.
@@ -65,7 +88,7 @@ Run `python3 scripts/check_repository.py` from the repository root. It uses Pyth
 
 ## CI gates
 
-The current [CI workflow](../.github/workflows/ci.yml) runs repository checks, Rust format/tests/Clippy, generated-contract drift checks, Vue typecheck/tests/build/audit, Chromium journeys and container build/smoke checks. Further release gates include secret/license policy automation, fuzzing, SQLite WAL stress, performance measurements, multi-architecture images, SBOM, signing/provenance, clean install, rollback/restore and privilege review. A configured workflow is not evidence of an executed hosted run.
+The current [CI workflow](../.github/workflows/ci.yml) runs the cheap repository check. Rust format/tests/Clippy, generated-contract drift checks, Vue typecheck/tests/build/audit, Chromium journeys and container checks run locally before integration. Further release gates include secret/license policy automation, fuzzing, SQLite WAL stress, performance measurements, multi-architecture images, SBOM, signing/provenance, clean install, rollback/restore and privilege review. A green hosted check does not prove application acceptance.
 
 ## Definition of done
 

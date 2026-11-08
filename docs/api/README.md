@@ -4,6 +4,8 @@ The default core feature set opens no TCP listener. HTTP and MCP are adapters to
 
 HTTP uses Axum 0.8.9. MCP uses the official Rust SDK rmcp 3.9.0. The lockfile fixes actual dependency versions. Vendor documentation: [Axum](https://docs.rs/axum/0.8.9/axum/), [rmcp](https://docs.rs/rmcp/3.9.0/rmcp/).
 
+Optional outbound alerts use a separately configured HTTPS receiver. Its [wire and acknowledgement contract](WEBHOOKS.md) is independent of the management API and read-only MCP.
+
 ## HTTP contract
 
 The prefix is `/api/v1`. All operational routes require `Authorization: Bearer <token>`. Only `GET /health/live` is public and returns `{"live":true}`. `GET /health/ready` calls the same protected daemon status query. `GET /session` returns the authenticated principal and grants.
@@ -11,11 +13,17 @@ The prefix is `/api/v1`. All operational routes require `Authorization: Bearer <
 | Method | Route | Input |
 | --- | --- | --- |
 | GET | `/status`, `/instance/status` | none |
+| GET | `/alerts/status` | installation-wide Admin authority |
+| GET | `/alerts/deliveries` | `cursor`, `limit` (maximum 100); same authority |
+| POST | `/alerts/deliveries/{id}/retry` | `{}` and required `Idempotency-Key`; one additional send |
 | GET | `/workloads` | `namespace`, `cursor`, `limit` |
 | GET | `/workloads/{id}` | none |
 | GET | `/executions` | `workload_id`, `cursor`, `limit` |
 | GET | `/executions/{id}` | none |
-| GET | `/executions/{id}/logs` | `offset` bytes (default 0), `max_bytes` (default 16384) |
+| GET | `/executions/{id}/logs` | optional raw byte `offset`; omitted selects the retained start in the read command; `max_bytes` defaults to 16384 |
+| GET | `/executions/{id}/logs/info` | none; current attempt's retained range and capture state |
+| GET | `/log-storage` | none; installation policy and usage, global Admin only |
+| POST | `/log-storage` | `{"policy":{"max_disk_bytes":268435456,"max_segments":1024,"retention_seconds":604800},"expected_revision":1}` |
 | GET | `/schedules/{id}/preview` | `count` (default 10) |
 | GET | `/operations/{id}`, `/diagnostics/{id}` | none |
 | GET | `/audit` | `cursor`, `limit` |
@@ -37,7 +45,9 @@ Identifiers must be valid UTF-8, percent-encoded as individual URL path componen
 
 Security-sensitive singleton headers reject duplicates, including Authorization, Host, Origin, Content-Type, Idempotency-Key, Last-Event-ID and preflight control headers. Malformed or oversized daemon replies are service failures rather than invalid client requests; explicitly returned daemon input-validation errors retain their client-error classification.
 
-Workload lifecycle mutations and config apply require `Idempotency-Key` (1–128 printable bytes), return `202`, and carry the durable `OperationDto` from the daemon. A `Location` response header points to operation status. An accepted request can already have a final state if the daemon completed it synchronously; callers inspect the returned operation state. Acceptance never proves a process has started or stopped. Token administration is an audited immediate response; clients must not automatically retry token creation.
+Workload lifecycle mutations, config apply and installation log-policy updates require `Idempotency-Key` (1–128 printable bytes), return `202`, and carry the durable `OperationDto` from the daemon. A `Location` response header points to operation status. An accepted request can already have a final state if the daemon completed it synchronously; callers inspect the returned operation state. Acceptance never proves a process has started or stopped. Token administration is an audited immediate response; clients must not automatically retry token creation.
+
+Log responses preserve raw `next_offset` and include canonical `stream` metadata: capture mode/state, retained start/end, retained bytes, known discarded bytes and expiry/truncation indicators. Rotation does not reset offsets. An explicit stale offset returns 409 `LOG_CURSOR_EXPIRED`; show the history gap and omit the offset to select/read the retained start within one owner command. This avoids a separate metadata/read race. Explicit offsets remain useful for paging and fail when their history has expired; offsets beyond the verified end are invalid. `/logs/info` remains available for inspection. Preserve attempt identity and bound retries. Missing retained files return unavailable evidence, never a fabricated complete stream.
 
 Remote service desired-state and restart requests require the current workload revision; stale or missing revision is rejected by the daemon.
 
@@ -91,7 +101,7 @@ Both role and capability must permit an action, and workload/execution access al
 | Docker/systemd apply or lifecycle control | Operator, Editor, Admin, subject to the action's role above | Additional `docker.manage` / `systemd.manage` |
 | Reconcile UNKNOWN execution | Admin | Unscoped `operations.manage` and target namespace |
 | Token create/list/revoke | Admin | Unscoped `tokens.manage`; delegation and inventory remain bounded by the caller's grants/namespaces |
-| Instance audit or installation-wide retention changes | Admin | Unscoped `operations.manage` and wildcard namespace; retention edits also require normal apply grants |
+| Instance audit, global log-policy/usage reads or installation-wide retention changes | Admin | Unscoped `operations.manage` and wildcard namespace |
 
 Capabilities may be unscoped (`logs.read`) or target-specific (`logs.read:WORKLOAD_UUID`) when the command checks a workload target. Use the canonical workload UUID returned by listing/detail, including for execution controls/logs; a `namespace/name` lookup is not the capability target. Creation has no UUID yet, so command/executor grants on its apply target use `namespace/name`. List, status, event and other checks without a target require unscoped grants; a target-specific read grant does not authorize a list. `*` grants all capabilities allowed by the role. Namespace grants accept exact names or `*`.
 
@@ -106,7 +116,7 @@ For routine control of one existing native service in `production`, bootstrap fr
 
 Replace the UUID and private output path. This operator can read workloads/executions in its namespace, but controls/log access are limited to that service. Add the corresponding target-specific `docker.manage` or `systemd.manage` grant for an external service. Operation lookup allows the originating actor's own operations; another actor's operation requires Admin with unscoped `operations.manage` plus its target namespace (wildcard for a batch operation). Status also accepts an explicit unscoped `instance.read` grant; ordinary workload-read access is sufficient.
 
-The workload fields `logs.maxDiskBytes`, `logs.maxSegments` and `logs.retentionSeconds` affect installation-wide retention. Changing these fields on an existing definition requires an Admin with `operations.manage` and wildcard namespace scope, for both single and batch apply. Scoped creators may add workloads only when these settings do not tighten the current effective installation limits. Per-run log size and ordinary safe configuration edits keep their existing permissions.
+Installation log storage has one versioned policy, changed only by `POST /log-storage` with the current revision. Decreasing byte/file/age limits requires draining active work and reconciling UNKNOWN first. Legacy workload fields `logs.maxDiskBytes`, `logs.maxSegments` and `logs.retentionSeconds` are accepted unchanged on existing definitions or can be removed; they no longer recompute global policy. New/changed explicit legacy values return 422 `LOG_POLICY_MOVED`. Per-workload `maxRunBytes` and optional native rotation keep ordinary safe-edit permissions, subject to the global ceiling and FILE/API ownership.
 
 Application errors use `{"error":{"code":"...","message":"..."},"requestId":"req_..."}`. The HTTP adapter adds `X-Request-Id` to responses and replaces backend messages with fixed public messages. Authentication maps to 401, authorization 403, missing resources 404, ownership/revision/idempotency conflicts 409, unsupported content type 415, policy rejection 422, limits 429, unavailable daemon/executor 503, and unavailable storage 507. Unknown internal errors return 500 without their messages. Framework rejection can differ: a malformed UTF-8 path such as `/api/v1/workloads/%FF` returns 400 with `text/plain`. Clients must check status and Content-Type before parsing an error as JSON.
 

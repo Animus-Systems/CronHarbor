@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use cronharbor::{
     Error, Result,
-    config::Manifest,
-    contracts::{AppCommand, Role},
+    config::{AlertConfig, Manifest},
+    contracts::{AppCommand, LogDto, LogStoragePolicyInput, Role},
     server::{self, Request},
 };
 use serde::Deserialize;
@@ -76,6 +76,16 @@ enum Command {
         follow: bool,
         #[arg(long, default_value_t = 65_536)]
         max_bytes: u32,
+        #[arg(long, conflicts_with = "follow")]
+        info: bool,
+    },
+    LogStorage {
+        #[command(subcommand)]
+        command: LogStorageCommand,
+    },
+    Alerts {
+        #[command(subcommand)]
+        command: AlertCommand,
     },
     Tokens {
         #[command(subcommand)]
@@ -150,6 +160,37 @@ enum ConfigCommand {
         file: PathBuf,
         #[arg(long)]
         expected_revision: Option<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum LogStorageCommand {
+    Status,
+    Set {
+        #[arg(long)]
+        max_disk_bytes: u64,
+        #[arg(long)]
+        max_segments: u32,
+        #[arg(long)]
+        retention_seconds: u64,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum AlertCommand {
+    Status,
+    List {
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    Retry {
+        id: String,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
@@ -243,6 +284,7 @@ enum ImportCommand {
 struct DaemonConfig {
     workloads: Vec<PathBuf>,
     paused: bool,
+    alerts: Option<AlertConfig>,
     #[cfg(feature = "api")]
     listen: Option<std::net::SocketAddr>,
     #[cfg(feature = "api")]
@@ -341,6 +383,8 @@ pub fn run() -> Result<Value> {
             } else {
                 DaemonConfig::default()
             };
+            server::validate_alert_config(settings.alerts.as_ref())?;
+            let alerts = settings.alerts.take();
             settings.workloads.extend(file);
             let mut manifests = Vec::new();
             for path in &settings.workloads {
@@ -363,8 +407,13 @@ pub fn run() -> Result<Value> {
                 let flag = Arc::clone(&shutdown);
                 let core_dir = directory.clone();
                 let core = thread::spawn(move || {
-                    let result =
-                        server::run_with_shutdown(&core_dir, &manifests, paused, Arc::clone(&flag));
+                    let result = server::run_with_settings(
+                        &core_dir,
+                        &manifests,
+                        paused,
+                        alerts,
+                        Arc::clone(&flag),
+                    );
                     flag.store(true, Ordering::Relaxed);
                     result
                 });
@@ -388,10 +437,41 @@ pub fn run() -> Result<Value> {
                 core_result?;
                 return Ok(json!({"stopped":true}));
             }
-            server::run_with_shutdown(&directory, &manifests, paused, shutdown)?;
+            server::run_with_settings(&directory, &manifests, paused, alerts, shutdown)?;
             Ok(json!({"stopped":true}))
         }
         Command::Status => call(AppCommand::Status),
+        Command::Alerts { command } => match command {
+            AlertCommand::Status => call(AppCommand::AlertStatus),
+            AlertCommand::List { cursor, limit } => {
+                call(AppCommand::AlertDeliveries { cursor, limit })
+            }
+            AlertCommand::Retry {
+                id,
+                idempotency_key,
+            } => call(AppCommand::RetryAlert {
+                id,
+                idempotency_key: key(idempotency_key),
+            }),
+        },
+        Command::LogStorage { command } => match command {
+            LogStorageCommand::Status => call(AppCommand::LogStorage),
+            LogStorageCommand::Set {
+                max_disk_bytes,
+                max_segments,
+                retention_seconds,
+                expected_revision,
+                idempotency_key,
+            } => call(AppCommand::SetLogStorage {
+                policy: LogStoragePolicyInput {
+                    max_disk_bytes,
+                    max_segments,
+                    retention_seconds,
+                },
+                expected_revision,
+                idempotency_key: key(idempotency_key),
+            }),
+        },
         Command::Config { command } => match command {
             ConfigCommand::Validate { file } => {
                 let items=definitions(&file)?.iter().map(|m|m.canonical().map(|(_,hash)|json!({"name":m.metadata.name,"valid":true,"revisionHash":hash}))).collect::<Result<Vec<_>>>()?;
@@ -550,29 +630,71 @@ pub fn run() -> Result<Value> {
             attempt_id,
             follow,
             max_bytes,
+            info,
         } => {
+            if info {
+                return call(AppCommand::LogInfo { attempt_id });
+            }
             let stop = Arc::new(AtomicBool::new(false));
             if follow {
                 signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stop))
                     .map_err(|_| fail("SIGNAL_UNAVAILABLE", "Cannot follow logs"))?;
             }
-            let mut offset = 0;
+            let mut cursor = None;
+            let mut recovering = false;
             loop {
-                let response = call(AppCommand::Logs {
-                    attempt_id: attempt_id.clone(),
-                    offset,
-                    max_bytes,
-                })?;
+                let command = if let Some(offset) = cursor {
+                    AppCommand::Logs {
+                        attempt_id: attempt_id.clone(),
+                        offset,
+                        max_bytes,
+                    }
+                } else {
+                    AppCommand::LatestLogs {
+                        attempt_id: attempt_id.clone(),
+                        max_bytes,
+                    }
+                };
+                let response = match call(command) {
+                    Ok(response) => response,
+                    Err(error) if follow && error.code == "LOG_CURSOR_EXPIRED" => {
+                        cursor = None;
+                        recovering = true;
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let chunk: LogDto = serde_json::from_value(response.clone())
+                    .map_err(|_| fail("LOG_UNAVAILABLE", "Log response is invalid"))?;
+                if chunk.attempt_id != attempt_id || chunk.stream.attempt_id != attempt_id {
+                    return Err(fail(
+                        "LOG_UNAVAILABLE",
+                        "Log response selected a different attempt",
+                    ));
+                }
+                if cursor.is_none() && chunk.stream.retained_from_offset > 0 {
+                    let start = chunk.stream.retained_from_offset;
+                    if recovering {
+                        eprintln!(
+                            "Log history expired during follow; resuming at retained byte {start}."
+                        );
+                    } else {
+                        eprintln!(
+                            "Earlier log history expired; starting at retained byte {start}."
+                        );
+                    }
+                }
+                recovering = false;
                 if !follow {
                     return Ok(response);
                 }
-                let text = response["text"].as_str().unwrap_or("");
-                if !text.is_empty() {
+                if !chunk.text.is_empty() {
                     println!("{response}");
                 }
-                offset = response["next_offset"].as_u64().ok_or_else(|| {
-                    fail("LOG_UNAVAILABLE", "Log response has no raw byte cursor")
-                })?;
+                cursor = Some(chunk.next_offset);
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }

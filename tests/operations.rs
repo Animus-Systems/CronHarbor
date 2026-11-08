@@ -49,9 +49,31 @@ fn backup_restore_is_verified_and_always_quarantined() {
 fn version_two_snapshot_restores_then_upgrades_in_quarantine() {
     let temp = tempfile::tempdir().unwrap();
     let backup = snapshot(&temp.path().join("source"));
-    let database = Connection::open(&backup).unwrap();
-    database.execute_batch("DROP INDEX audit_auth_rejections; DELETE FROM schema_migrations WHERE version=3; PRAGMA user_version=2;").unwrap();
+    // Build a genuine schema-2 database; lowering user_version leaves newer tables behind.
+    let old_path = temp.path().join("schema-two.db");
+    let database = Connection::open(&old_path).unwrap();
+    for (version, sql) in [
+        (1, include_str!("../migrations/0001_initial.sql")),
+        (2, include_str!("../migrations/0002_runtime.sql")),
+    ] {
+        database.execute_batch(sql).unwrap();
+        database
+            .execute(
+                "INSERT INTO schema_migrations(version,checksum,applied_at_us) VALUES(?1,?2,0)",
+                rusqlite::params![version, format!("{:x}", Sha256::digest(sql.as_bytes()))],
+            )
+            .unwrap();
+    }
+    database
+        .execute("ATTACH DATABASE ?1 AS source", [&backup])
+        .unwrap();
+    database.execute_batch("BEGIN; INSERT INTO workloads SELECT * FROM source.workloads; INSERT INTO workload_revisions SELECT * FROM source.workload_revisions; INSERT INTO schedules SELECT * FROM source.schedules; COMMIT; DETACH DATABASE source; PRAGMA user_version=2;").unwrap();
     drop(database);
+    fs::copy(old_path, &backup).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     resign_snapshot(Path::new(&backup), Some(2));
     let target = temp.path().join("restored");
     ops::restore(
@@ -69,7 +91,7 @@ fn version_two_snapshot_restores_then_upgrades_in_quarantine() {
     let version: u32 = database
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 5);
     assert_eq!(store.status(false).unwrap().workloads, 1);
 }
 

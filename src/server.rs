@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File},
+    fs::{self},
     io::{Read, Write},
     os::unix::{
         fs::{FileTypeExt, MetadataExt},
@@ -167,7 +167,38 @@ pub fn run_with_shutdown(
     paused: bool,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
-    let mut store = Store::open(directory)?;
+    run_with_settings(directory, manifests, paused, None, shutdown)
+}
+
+pub fn validate_alert_config(alerts: Option<&crate::config::AlertConfig>) -> Result<()> {
+    if let Some(config) = alerts {
+        #[cfg(feature = "webhooks")]
+        return crate::webhooks::validate_config(config);
+        #[cfg(not(feature = "webhooks"))]
+        {
+            let _ = config;
+            return Err(Error::new(
+                "FEATURE_UNAVAILABLE",
+                "Outbound alerts require the webhooks feature",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn run_with_settings(
+    directory: &Path,
+    manifests: &[Manifest],
+    paused: bool,
+    alerts: Option<crate::config::AlertConfig>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    validate_alert_config(alerts.as_ref())?;
+    let mut store = Store::open_with_alerts(directory, alerts.as_ref())?;
+    #[cfg(feature = "webhooks")]
+    let mut alert_worker = alerts
+        .map(crate::webhooks::WebhookWorker::spawn)
+        .transpose()?;
     let mut identities = std::collections::BTreeSet::new();
     for manifest in manifests {
         manifest.validate()?;
@@ -232,9 +263,48 @@ pub fn run_with_shutdown(
     let mut external: Vec<ExternalWatch> = Vec::new();
     let mut cleanup: Option<(String, thread::JoinHandle<bool>)> = None;
     let mut recovered_at = Instant::now() - Duration::from_secs(10);
+    let mut retained_at = Instant::now();
     loop {
         let stopping = shutdown.load(Ordering::Relaxed);
         let now = crate::now_us();
+        #[cfg(feature = "webhooks")]
+        if let Some(worker) = &mut alert_worker {
+            if stopping {
+                worker.shutdown();
+            }
+            if let Some(result) = worker.try_result() {
+                store.complete_alert(result, now)?;
+            }
+            if !stopping && !worker.available() {
+                store.alert_worker_unavailable = true;
+            }
+            if !stopping
+                && worker.idle()
+                && let Some(job) = store.claim_alert(now)?
+                && worker.try_send(job).is_err()
+            {
+                store.alert_worker_unavailable = true;
+            }
+        }
+        if !stopping {
+            store.scan_current_alerts(now)?;
+        }
+        // Observe every source and revoke uncertain captures before any stream may rotate or reclaim.
+        let mut native_observations = Vec::with_capacity(native.len());
+        for (launch, process) in &mut native {
+            if stopping
+                || store.cancel_requested(&launch.attempt_id)?
+                || store.service_should_stop(launch)?
+            {
+                process.cancel();
+            }
+            let observed = process.poll_with_capture_budget(&mut store, &mut 0);
+            if observed.is_err() {
+                process.freeze_capture(&store)?;
+            }
+            native_observations.push(Some(observed));
+        }
+        let mut capture_budget = 8;
         let mut index = 0;
         while index < native.len() {
             let requested = store.cancel_requested(&native[index].0.attempt_id)?
@@ -243,7 +313,16 @@ pub fn run_with_shutdown(
             if cancel {
                 native[index].1.cancel();
             }
-            let polled = native[index].1.poll();
+            let observed = native_observations
+                .get_mut(index)
+                .and_then(Option::take)
+                .ok_or_else(|| Error::new("INTERNAL_ERROR", "Missing process observation"))?;
+            let polled = match observed {
+                Ok(None) => native[index]
+                    .1
+                    .poll_with_capture_budget(&mut store, &mut capture_budget),
+                other => other,
+            };
             let probe_events = native[index].1.take_probe_events();
             store.record_probe_events(&native[index].0, &probe_events)?;
             match polled {
@@ -253,6 +332,7 @@ pub fn run_with_shutdown(
                     }
                     store.finish(&native[index].0, &outcome, now)?;
                     native.swap_remove(index);
+                    native_observations.swap_remove(index);
                 }
                 Ok(None) => {
                     let state = native[index].1.service_observation();
@@ -260,11 +340,16 @@ pub fn run_with_shutdown(
                     index += 1;
                 }
                 Err(_) => {
+                    native[index].1.freeze_capture(&store)?;
                     let outcome = unknown_outcome("EXECUTOR_UNAVAILABLE");
                     store.finish(&native[index].0, &outcome, now)?;
                     native.swap_remove(index);
+                    native_observations.swap_remove(index);
                 }
             }
+        }
+        if native.len() > 1 {
+            native.rotate_left(1);
         }
         let mut index = 0;
         while index < pending.len() {
@@ -281,7 +366,6 @@ pub fn run_with_shutdown(
                             handle,
                             item.secrets,
                             started,
-                            item.disk_limit,
                         ));
                     }
                     Ok(Err(error)) => {
@@ -351,7 +435,27 @@ pub fn run_with_shutdown(
                     store.service_observation(&external[index].launch, state, now)?;
                     index += 1;
                 }
-                Some(ExternalResult::Finished(outcome, logs_persisted)) => {
+                Some(ExternalResult::Finished(mut outcome, snapshot)) => {
+                    let logs_persisted = if let Some(bytes) = snapshot {
+                        let launch = &external[index].launch;
+                        let saved = store
+                            .prepare_log_capture(launch)
+                            .and_then(|()| store.append_log(launch, &bytes));
+                        match saved {
+                            Ok(saved) => {
+                                outcome.log_bytes = u64::try_from(saved).unwrap_or(0);
+                                outcome.log_truncated |= saved < bytes.len();
+                                saved == bytes.len()
+                            }
+                            Err(error) => {
+                                store.stop_log_capture(&launch.attempt_id, &error.code, 0)?;
+                                outcome.log_truncated = true;
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
                     store.finish_external(
                         &external[index].launch,
                         &outcome,
@@ -414,14 +518,13 @@ pub fn run_with_shutdown(
                     None
                 };
                 let started = store.attempt_started_at(&launch.attempt_id)?;
-                external.push(ExternalWatch::new(
-                    launch,
-                    handle,
-                    secrets,
-                    started,
-                    store.log_disk_limit()?,
-                ));
+                external.push(ExternalWatch::new(launch, handle, secrets, started));
             }
+        }
+        if retained_at.elapsed() >= Duration::from_secs(1) {
+            store.retain_logs()?;
+            store.maintain_alerts(now)?;
+            retained_at = Instant::now();
         }
         for _ in 0..16 {
             match listener.accept() {
@@ -507,7 +610,6 @@ struct PendingStart {
     launch: Launch,
     task: thread::JoinHandle<Result<crate::external::ExternalHandle>>,
     secrets: Option<Vec<Vec<u8>>>,
-    disk_limit: u64,
 }
 fn dispatch(
     store: &mut Store,
@@ -518,11 +620,7 @@ fn dispatch(
     if launch.manifest.spec.execution.adapter == "process" {
         store.retain_logs()?;
         store.start_requested(&launch.attempt_id, crate::now_us())?;
-        match RunningProcess::spawn_with_log_limit(
-            &launch,
-            &store.directory,
-            store.log_disk_limit()?,
-        ) {
+        match RunningProcess::spawn(&launch, store) {
             Ok(process) => {
                 store.running(&launch, process.pid(), crate::now_us())?;
                 native.push((launch, process));
@@ -593,14 +691,13 @@ fn dispatch(
         launch,
         task,
         secrets,
-        disk_limit: store.log_disk_limit()?,
     });
     Ok(())
 }
 enum ExternalResult {
     Retired,
     Running(Option<bool>),
-    Finished(Outcome, bool),
+    Finished(Outcome, Option<Vec<u8>>),
 }
 struct ExternalWatch {
     retired: Arc<AtomicBool>,
@@ -610,7 +707,6 @@ struct ExternalWatch {
     task: Option<thread::JoinHandle<ExternalResult>>,
     next: Instant,
     started_at_us: i64,
-    disk_limit: u64,
     stopping: bool,
 }
 impl ExternalWatch {
@@ -619,7 +715,6 @@ impl ExternalWatch {
         handle: crate::external::ExternalHandle,
         secrets: Option<Vec<Vec<u8>>>,
         started_at_us: i64,
-        disk_limit: u64,
     ) -> Self {
         Self {
             retired: Arc::new(AtomicBool::new(false)),
@@ -629,7 +724,6 @@ impl ExternalWatch {
             task: None,
             next: Instant::now(),
             started_at_us,
-            disk_limit,
             stopping: false,
         }
     }
@@ -648,7 +742,7 @@ impl ExternalWatch {
             let task = self.task.take()?;
             self.next = Instant::now() + Duration::from_secs(1);
             return Some(task.join().unwrap_or_else(|_| {
-                ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), false)
+                ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None)
             }));
         }
         if self.task.is_some() || Instant::now() < self.next {
@@ -669,8 +763,6 @@ impl ExternalWatch {
             .cloned()
             .collect::<Vec<_>>();
         let cap = self.launch.manifest.spec.logs.max_run_bytes.min(1_048_576);
-        let disk_cap = self.disk_limit;
-        let attempt = self.launch.attempt_id.clone();
         let grace = self.launch.manifest.spec.service.stop_grace_seconds;
         let stop_state = if timed_out {
             EndState::TimedOut
@@ -681,10 +773,7 @@ impl ExternalWatch {
             let policy = match crate::external::load_policy(&directory) {
                 Ok(policy) => policy,
                 Err(_) => {
-                    return ExternalResult::Finished(
-                        unknown_outcome("EXECUTOR_UNAVAILABLE"),
-                        false,
-                    );
+                    return ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None);
                 }
             };
             if retired.load(Ordering::Relaxed) {
@@ -698,7 +787,7 @@ impl ExternalWatch {
                     _ => {
                         return ExternalResult::Finished(
                             unknown_outcome("TERMINATION_UNCONFIRMED"),
-                            false,
+                            None,
                         );
                     }
                 }
@@ -706,10 +795,7 @@ impl ExternalWatch {
             let observed = match crate::external::inspect(&policy, &handle) {
                 Ok(value) => value,
                 Err(_) => {
-                    return ExternalResult::Finished(
-                        unknown_outcome("EXECUTOR_UNAVAILABLE"),
-                        false,
-                    );
+                    return ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None);
                 }
             };
             if retired.load(Ordering::Relaxed) {
@@ -720,7 +806,7 @@ impl ExternalWatch {
                     ExternalResult::Running(observed.healthy)
                 }
                 crate::external::ExternalState::Unknown => {
-                    ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), false)
+                    ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None)
                 }
                 crate::external::ExternalState::Absent => ExternalResult::Finished(
                     if stopping {
@@ -734,7 +820,7 @@ impl ExternalWatch {
                     } else {
                         unknown_outcome("EXTERNAL_IDENTITY_ABSENT")
                     },
-                    false,
+                    None,
                 ),
                 crate::external::ExternalState::Exited => {
                     let secrets = secrets.or_else(|| {
@@ -771,19 +857,6 @@ impl ExternalWatch {
                     if retired.load(Ordering::Relaxed) {
                         return ExternalResult::Retired;
                     }
-                    let saved = (|| -> Result<u64> {
-                        let logs = crate::store::private_directory(&directory.join("logs"))?;
-                        let mut file =
-                            crate::store::secure_file(&logs.join(format!("{attempt}.log")))?;
-                        let bytes =
-                            &bytes[..bytes.len().min(usize::try_from(cap).unwrap_or(1_048_576))];
-                        let (written, _) =
-                            crate::process::write_log_chunk(&mut file, &logs, disk_cap, bytes)
-                                .map_err(|_| transport_error())?;
-                        file.sync_all().map_err(|_| transport_error())?;
-                        Ok(u64::try_from(written).unwrap_or(0))
-                    })();
-                    let log_failed = saved.is_err();
                     let state = if stopping {
                         stop_state
                     } else {
@@ -814,14 +887,10 @@ impl ExternalWatch {
                                 EndState::Unknown => Some("RECONCILIATION_REQUIRED"),
                             },
                             exit_code: observed.exit_code,
-                            log_bytes: saved.as_ref().copied().unwrap_or(0),
-                            log_truncated: truncated
-                                || log_failed
-                                || saved.as_ref().is_ok_and(|written| {
-                                    *written < u64::try_from(bytes.len()).unwrap_or(u64::MAX)
-                                }),
+                            log_bytes: 0,
+                            log_truncated: truncated,
                         },
-                        !log_failed && logs_received,
+                        if logs_received { Some(bytes) } else { None },
                     )
                 }
             }
@@ -852,18 +921,9 @@ fn handle(store: &mut Store, stream: &mut UnixStream, paused: bool) -> Result<Va
             Ok(json!({"revisionId":store.apply(&manifest,crate::now_us())?}))
         }
         Request::Logs { attempt_id } => {
-            let path = store.log_path(&attempt_id)?;
-            let file = File::open(path).map_err(|_| {
-                Error::new("LOG_UNAVAILABLE", "Logs are not available for this attempt")
-            })?;
-            let mut bytes = Vec::new();
-            file.take(65_537)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error::new("LOG_UNAVAILABLE", "Cannot read logs"))?;
-            let truncated = bytes.len() > 65_536;
-            bytes.truncate(65_536);
+            let log = store.read_latest_log(&attempt_id, 65_536)?;
             Ok(
-                json!({"attemptId":attempt_id,"text":String::from_utf8_lossy(&bytes),"responseTruncated":truncated,"untrusted":true}),
+                json!({"attemptId":attempt_id,"text":log.text,"responseTruncated":log.response_truncated,"logTruncated":log.log_truncated,"retainedFromOffset":log.stream.retained_from_offset,"historyEvicted":log.stream.history_evicted,"nextOffset":log.next_offset,"untrusted":true}),
             )
         }
     }

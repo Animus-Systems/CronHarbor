@@ -10,6 +10,8 @@ COPY examples ./examples
 COPY schema ./schema
 
 FROM source AS checks
+RUN apt-get update && apt-get install --yes --no-install-recommends python3 openssl \
+    && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,id=cronharbor-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cronharbor-target-${TARGETARCH},target=/build/target \
     cargo test --locked --all-features --all-targets && cargo clippy --locked --all-features --all-targets -- -D warnings

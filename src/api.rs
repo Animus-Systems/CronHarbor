@@ -1,7 +1,7 @@
 //! Optional HTTP transport. All operational requests go through the daemon policy.
 use crate::{
     Error, Result,
-    contracts::{AppCommand, EventDto, OperationDto, Page, Role},
+    contracts::{AppCommand, EventDto, LogStoragePolicyInput, OperationDto, Page, Role},
     server,
 };
 use axum::{
@@ -171,10 +171,13 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         "/executions",
         "/executions/{id}",
         "/executions/{id}/logs",
+        "/executions/{id}/logs/info",
         "/schedules/{id}/preview",
         "/operations/{id}",
         "/diagnostics/{id}",
         "/audit",
+        "/alerts/status",
+        "/alerts/deliveries",
     ] {
         api = api.route(route, get(dispatch));
     }
@@ -190,10 +193,12 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         "/executions/{id}/reconcile",
         "/tokens/create",
         "/tokens/{id}/revoke",
+        "/alerts/deliveries/{id}/retry",
     ] {
         api = api.route(route, post(dispatch));
     }
     api = api
+        .route("/log-storage", get(dispatch).post(dispatch))
         .route("/tokens", get(dispatch).post(dispatch))
         .route("/health/live", get(|| async { Json(json!({"live":true})) }))
         .route("/events", get(events))
@@ -378,7 +383,11 @@ impl ApiError {
                 "IDEMPOTENCY_CONFLICT",
                 "Idempotency key was already used for a different request",
             ),
-            "CONFLICT" | "RESTORE_REQUIRED" | "STATE_CONFLICT" | "RECONCILIATION_REQUIRED" => (
+            "CONFLICT"
+            | "RESTORE_REQUIRED"
+            | "STATE_CONFLICT"
+            | "RECONCILIATION_REQUIRED"
+            | "ALERTS_DISABLED" => (
                 409,
                 "STATE_CONFLICT",
                 "Current state does not permit this operation",
@@ -388,6 +397,16 @@ impl ApiError {
                 "EVENT_CURSOR_EXPIRED",
                 "Event history has expired; refresh current state",
             ),
+            "LOG_CURSOR_EXPIRED" => (
+                409,
+                "LOG_CURSOR_EXPIRED",
+                "Earlier log output has expired; inspect the retained range before continuing",
+            ),
+            "LOG_POLICY_MOVED" => (
+                422,
+                "LOG_POLICY_MOVED",
+                "Installation log limits are managed through the global log storage policy",
+            ),
             "INPUT_INVALID" | "CONFIG_INVALID" | "CURSOR_INVALID" => {
                 (400, "INPUT_INVALID", "Request parameters are invalid")
             }
@@ -396,11 +415,13 @@ impl ApiError {
                 "POLICY_REJECTED",
                 "Workload does not satisfy configured policy",
             ),
-            "RATE_LIMITED" => (429, "RATE_LIMITED", "Request limit reached; retry later"),
+            "RATE_LIMITED" | "ALERT_QUEUE_FULL" => {
+                (429, "RATE_LIMITED", "Request limit reached; retry later")
+            }
             "PERSISTENCE_UNAVAILABLE" | "STORAGE_UNAVAILABLE" => {
                 (507, "STORAGE_UNAVAILABLE", "State storage is unavailable")
             }
-            "LOCAL_TRANSPORT_UNAVAILABLE" | "EXECUTOR_UNAVAILABLE" => (
+            "LOCAL_TRANSPORT_UNAVAILABLE" | "EXECUTOR_UNAVAILABLE" | "WORKER_UNAVAILABLE" => (
                 503,
                 "SERVICE_UNAVAILABLE",
                 "The local service is unavailable",
@@ -816,6 +837,12 @@ struct Reconcile {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LogStorageUpdate {
+    policy: LogStoragePolicyInput,
+    expected_revision: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateToken {
     role: Role,
     namespaces: Vec<String>,
@@ -920,7 +947,9 @@ async fn dispatch(
         .unwrap_or(matched.as_str());
     let mut accepted = false;
     let mut admitted = false;
-    let expensive = route.ends_with("/logs") || route.starts_with("/diagnostics/");
+    let expensive = route.ends_with("/logs")
+        || route.ends_with("/logs/info")
+        || route.starts_with("/diagnostics/");
     let command = match (request.method().clone(), route) {
         (Method::GET, "/status" | "/instance/status" | "/health/ready") => {
             let _: Empty = query(&request)?;
@@ -929,6 +958,42 @@ async fn dispatch(
         (Method::GET, "/session") => {
             let _: Empty = query(&request)?;
             AppCommand::Identity
+        }
+        (Method::GET, "/log-storage") => {
+            let _: Empty = query(&request)?;
+            AppCommand::LogStorage
+        }
+        (Method::GET, "/alerts/status") => {
+            let _: Empty = query(&request)?;
+            AppCommand::AlertStatus
+        }
+        (Method::GET, "/alerts/deliveries") => {
+            let q = list(&request, "alerts")?;
+            AppCommand::AlertDeliveries {
+                cursor: q.cursor,
+                limit: q.limit.unwrap_or(50),
+            }
+        }
+        (Method::POST, "/alerts/deliveries/{id}/retry") => {
+            let _: Empty = query(&request)?;
+            let key = idempotency(request.headers())?;
+            let _: Empty = body(request).await?;
+            accepted = true;
+            AppCommand::RetryAlert {
+                id,
+                idempotency_key: key,
+            }
+        }
+        (Method::POST, "/log-storage") => {
+            let _: Empty = query(&request)?;
+            let key = idempotency(request.headers())?;
+            let update: LogStorageUpdate = body(request).await?;
+            accepted = true;
+            AppCommand::SetLogStorage {
+                policy: update.policy,
+                expected_revision: update.expected_revision,
+                idempotency_key: key,
+            }
         }
         (Method::GET, "/workloads") => {
             let q = list(&request, "workloads")?;
@@ -954,8 +1019,14 @@ async fn dispatch(
             let _: Empty = query(&request)?;
             AppCommand::Execution { id }
         }
-        (Method::GET, "/executions/{id}/logs") => {
-            let q: LogsQuery = query(&request)?;
+        (Method::GET, "/executions/{id}/logs" | "/executions/{id}/logs/info") => {
+            let info = route.ends_with("/info");
+            let q: LogsQuery = if info {
+                let _: Empty = query(&request)?;
+                LogsQuery::default()
+            } else {
+                query(&request)?
+            };
             let max_bytes = q.max_bytes.unwrap_or(16_384);
             if !(1..=65_536).contains(&max_bytes) {
                 return Err(ApiError::input());
@@ -974,10 +1045,19 @@ async fn dispatch(
                     )
                 })?
                 .to_owned();
-            AppCommand::Logs {
-                attempt_id,
-                offset: q.offset.unwrap_or(0),
-                max_bytes,
+            if info {
+                AppCommand::LogInfo { attempt_id }
+            } else if let Some(offset) = q.offset {
+                AppCommand::Logs {
+                    attempt_id,
+                    offset,
+                    max_bytes,
+                }
+            } else {
+                AppCommand::LatestLogs {
+                    attempt_id,
+                    max_bytes,
+                }
             }
         }
         (Method::GET, "/schedules/{id}/preview") => {

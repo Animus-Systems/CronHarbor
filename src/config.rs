@@ -155,6 +155,17 @@ pub enum SecretRef {
     Env { name: String },
     File { path: String },
 }
+/// Installation outbound alert destination. This is restart-only configuration, never persisted.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AlertConfig {
+    pub endpoint: String,
+    pub token_ref: SecretRef,
+    #[serde(default)]
+    pub allowed_private_addresses: Vec<std::net::IpAddr>,
+    #[serde(default)]
+    pub ca_file: Option<std::path::PathBuf>,
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ResourceLimits {
@@ -205,31 +216,34 @@ impl Default for Retry {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Logs {
     pub max_run_bytes: u64,
-    #[serde(default = "disk_cap")]
-    pub max_disk_bytes: u64,
-    #[serde(default = "segment_cap")]
+    /// Legacy installation control. Existing values may be retained or removed, but not changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_disk_bytes: Option<u64>,
+    /// Legacy installation control; use the installation log storage policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_segments: Option<u32>,
+    /// Legacy installation control; use the installation log storage policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<LogRotation>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LogRotation {
+    pub segment_bytes: u64,
     pub max_segments: u32,
-    #[serde(default = "retention")]
-    pub retention_seconds: u64,
 }
 impl Default for Logs {
     fn default() -> Self {
         Self {
             max_run_bytes: 10485760,
-            max_disk_bytes: disk_cap(),
-            max_segments: segment_cap(),
-            retention_seconds: retention(),
+            max_disk_bytes: None,
+            max_segments: None,
+            retention_seconds: None,
+            rotation: None,
         }
     }
-}
-fn disk_cap() -> u64 {
-    268_435_456
-}
-fn segment_cap() -> u32 {
-    1024
-}
-fn retention() -> u64 {
-    604800
 }
 #[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase", default)]
@@ -464,13 +478,28 @@ impl Manifest {
         }
         if !(1..=31_536_000).contains(&s.timeout_seconds)
             || s.logs.max_run_bytes > 1_073_741_824
-            || s.logs.max_disk_bytes == 0
-            || s.logs.max_disk_bytes > 10_737_418_240
-            || s.logs.max_segments == 0
-            || s.logs.max_segments > 100000
-            || s.logs.retention_seconds == 0
+            || s.logs
+                .max_disk_bytes
+                .is_some_and(|v| v == 0 || v > 10_737_418_240)
+            || s.logs.max_segments.is_some_and(|v| v == 0 || v > 100000)
+            || s.logs
+                .retention_seconds
+                .is_some_and(|v| v == 0 || v > 9_223_372_036_854)
         {
             return Err(invalid("Timeout or log retention is outside limits"));
+        }
+        if let Some(rotation) = &s.logs.rotation
+            && (e.adapter != "process"
+                || rotation.segment_bytes < 65_536
+                || !(2..=64).contains(&rotation.max_segments)
+                || rotation
+                    .segment_bytes
+                    .checked_mul(2)
+                    .is_none_or(|minimum| s.logs.max_run_bytes < minimum))
+        {
+            return Err(invalid(
+                "Native log rotation requires segments of at least 64 KiB, 2 to 64 segments, and room for two segments",
+            ));
         }
         let svc = &s.service;
         if !matches!(svc.desired_state.as_str(), "RUNNING" | "STOPPED")

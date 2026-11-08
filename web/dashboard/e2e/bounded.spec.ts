@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { logStream } from "../tests/log-fixtures";
 import type {
   DiagnosticDto,
   ExecutionDto,
@@ -69,6 +70,10 @@ test("synthetic load: 1000 workloads and 10000 log lines keep bounded DOM window
     const url = new URL(route.request().url());
     const path = url.pathname.replace("/api/v1", "");
     if (path === "/events") return;
+    if (path.endsWith("/logs/info")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(logStream(execution.attempt_id, 48890)) });
+      return;
+    }
     const body =
       path === "/session"
         ? principal
@@ -81,8 +86,9 @@ test("synthetic load: 1000 workloads and 10000 log lines keep bounded DOM window
               : path.endsWith("/logs")
                 ? {
                     attempt_id: execution.attempt_id,
+                    stream: logStream(execution.attempt_id, 48890),
                     text:
-                      url.searchParams.get("offset") === "0"
+                      !url.searchParams.has("offset") || url.searchParams.get("offset") === "0"
                         ? Array.from(
                             { length: 10000 },
                             (_, i) => `${i}\n`,
@@ -239,9 +245,11 @@ test("synthetic unknown outcome requires independent evidence before reconciliat
         evidence: [],
         safe_to_retry_automatically: false,
       };
+    else if (path.endsWith("/logs/info")) value = logStream(execution.attempt_id, 0, { capture_state: "FROZEN" });
     else if (path.endsWith("/logs"))
       value = {
         attempt_id: execution.attempt_id,
+        stream: logStream(execution.attempt_id, 0, { capture_state: "FROZEN" }),
         text: "",
         next_offset: 0,
         response_truncated: false,
@@ -459,6 +467,10 @@ test("synthetic log follow uses raw cursors for replacement characters and split
           exit_code: 0,
         }
       : execution;
+    if (path.endsWith("/logs/info")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(logStream(latest.attempt_id, retried ? 12 : 10)) });
+      return;
+    }
     let value: unknown = { items: [], next_cursor: null };
     if (path === "/session")
       value = {
@@ -495,6 +507,7 @@ test("synthetic log follow uses raw cursors for replacement characters and split
       value = retried
         ? {
             attempt_id: latest.attempt_id,
+            stream: logStream(latest.attempt_id, 12),
             text: offset === 0 ? "new attempt\n" : "",
             next_offset: 12,
             response_truncated: false,
@@ -503,6 +516,7 @@ test("synthetic log follow uses raw cursors for replacement characters and split
           }
         : {
             attempt_id: execution.attempt_id,
+            stream: logStream(execution.attempt_id, 10),
             text:
               offset === 0
                 ? "\uFFFD"

@@ -1,0 +1,10 @@
+# Requires API, Full, or Core built with --features webhooks.
+# Provision the receiving route and a separate ingestion-only credential first.
+alerts:
+  endpoint: https://main-api.internal.example/api/integrations/cronharbor/alerts
+  tokenRef:
+    provider: file
+    path: /etc/cronharbor/secrets/alert-ingest.token
+  allowedPrivateAddresses:
+    - 192.168.1.20
+  caFile: /etc/cronharbor/certs/internal-root.pem
