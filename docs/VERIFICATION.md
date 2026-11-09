@@ -407,3 +407,50 @@ optimized daemon bytes are reused from 4649ed1, SHA-256
 this is not a fresh Rust build/full Rust suite claim. The immutable deployment
 pairs those unchanged bytes with the newly built UI, preserves worker invocations
 and 73 definitions, and refreshes monitor provenance for the selected release.
+
+## Application HTTP readiness — 2026-11-09
+
+Prepared product0.12.0 adds owner-allowlisted HTTP readiness to systemd Services.
+Existing manifests and public DTOs remain compatible; no migration changed.
+Literal loopback-only transport rejects proxies, redirects, credentials, expansion
+and overlong responses. Invocation checks and store fences reject obsolete samples.
+HTTP failure reports unhealthy without introducing process restarts.
+
+Source checks passed334distinct all-feature/all-target Rust tests (plus one nested
+proxy child), strict Clippy, format, canonical exports and eight repository checks.
+Current browser evidence covers32distinct primary scenarios plus separate origin;
+two optional fixtures skipped. Production dashboard inputs and all four asset
+hashes exactly match the verified14e8e8b release, retaining its87unit/type/build
+checks; these are reused checks/assets, not a fresh frontend rebuild claim.
+
+Optimized Core/API/Full builds and profile isolation passed. Core/API explicitly
+reject HTTP manifests; Full accepts them. The18MiB Full binary SHA-256 is
+`b362919443c3352a6d421845e8a0577ac2d36016363f753409ebbe51c4654587`.
+Optimized REST/MCP/backup/quarantine/cutoff acceptance passed. Real disposable
+user-systemd acceptance passed fast and16-second oneshots, same-process adoption,
+daemon/OS restart recovery, verified stop, zeroUNKNOWN, old-format binary rollback
+and journaled bad-candidate/artifact rollback. No business worker was restarted.
+
+Minimal package images reuse those verified binaries/UI with the maintained
+runtime Docker stages. Full/Core container smoke passed nonroot/read-only roots,
+owner fencing, real scheduled output, history, authenticated API/UI and packaged
+Docker CLI without a socket mount. Opt-in Docker adapter acceptance used owned
+UUID fixtures on the selected localDEV engine; its outage case changes only the
+fixture policy to a dead socket, preservingUNKNOWN without replay. It does not
+stop the shared Docker engine. Disposable test containers/volumes were removed.
+
+A real disposable Canarias inventory passed79definitions,71disabled schedules,
+eight stopped Services, ten auxiliaries,44jobs/25collectors, zero omissions,
+6900schedule occurrences, nine concurrent synthetic effects and storage/idempotency/
+backup cases. The final optimized inventory completed in3.001seconds.
+
+Fresh independent review found no Critical issue and two Important Python helper
+uncertainty-persistence gaps. Their regressions failed first and now pass in the
+56-case control/lifecycle/monitor suite and optimized real-systemd drill. Deferred
+Minor: pre-promotion controller refusal can leave graph phase labelled refreshing
+while the scheduler correctly reports failure; no serving effect occurs.
+
+Actual application handover remains a separateDEV acceptance stage. This evidence
+does not claim production, another-host, VM reboot, signed-in business journeys,
+paid provider qualification, power-loss/OOM fault coverage or downgrade support for
+new HTTP definitions in older product binaries.
