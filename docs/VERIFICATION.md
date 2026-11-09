@@ -363,3 +363,16 @@ metadata-reference helper regression reproduced excessive serialized shutdown
 cleanup; cleanup is now bounded to 100 ms per reference, leaving headroom for
 the 900-second service drain. An active unit with no invocation receipt is rejected
 before any StartUnit request rather than manufacturing an uncertain launch.
+
+The final independent review found three Important defects. Each regression failed
+first and now passes: transitional systemd states remain STARTING, scheduled
+StartUnit receipts detect competing starts, and scheduled logs filter the persisted
+invocation. The fresh all-feature/all-target Rust suite passed 319 tests across 35
+targets, followed by strict Clippy and unchanged canonical exports. Eight repository
+checks and Python compilation passed. The real user-unit drill passed a genuine
+OS on-failure restart while retaining the same Harbor execution, normal startup,
+fast and 16-second oneshots, same-invocation adoption, daemon recovery, stop and
+quiescent old/new rollback. A separate real D-Bus race returned uncertainty and
+left the foreign invocation running. These fixtures touched no business workers.
+The live root PDF authorization and four-family deployment remain operator gates;
+no paid qualification, production or other-host acceptance is claimed.

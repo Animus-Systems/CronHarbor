@@ -145,7 +145,7 @@ An absent baseline or changed global manager blocks those old handles; new
 starts still use the pinned v2 format. Drain or reconcile old work before
 changing either historical setting. Scope changes retain uncertainty instead of redirecting control.
 
-Scheduled systemd jobs require `/usr/bin/python3` with the installed `dbus` module
+Scheduled systemd jobs require `/usr/bin/python3` with the installed `dbus` and GLib modules
 (owner-private `systemdReferencePython` can select another absolute interpreter).
 A bounded helper holds a D-Bus unit reference before start, so systemd cannot
 collect a fast oneshot's invocation/result before durable settlement. The reference
@@ -156,8 +156,13 @@ missing invocation metadata remains UNKNOWN and requires evidence-based resoluti
 A Service stop uses the successful blocking StopUnit receipt; unavailable post-stop
 logs are marked truncated instead of changing verified termination into success logs.
 
-Starts enqueue without waiting for a oneshot to finish, then require a new verified
-InvocationID before claiming a receipt. An old success or another invocation cannot
+Scheduled starts additionally require permission to monitor systemd control metadata
+on that manager bus. A bounded barrier window ties the returned StartUnit job and
+JobNew signal to the new InvocationID; competing mutations make the receipt UNKNOWN.
+Before requesting work, the bridge rejects active/enabled timer/path triggers,
+reverse activation dependencies and scheduled units with OS automatic restart.
+Disable old triggers before handover. This does not add any OS permissions.
+Starts enqueue without waiting for a oneshot to finish. An old success or another invocation cannot
 complete a scheduled run. Lost receipts stay UNKNOWN. A managed Service can adopt
 an already healthy allowlisted unit without restarting it and owns that logical
 unit across its existing OS restart policy; disable Cron Harbor automatic restart
@@ -167,7 +172,7 @@ Old binaries cannot interpret new scoped handles: drain/reconcile and verify a
 compatible rollback state before downgrading. Do not test a downgrade against live
 state or restore an old business database over current work.
 
-The systemd bridge controls only exact allowlisted existing `.service` units. Existing units retain their execution environment, credentials, AppArmor, filesystem and cgroup protections. Unit manifests reject native command/env/limit settings instead of silently ignoring them. Journal capture uses the persisted start-intent time as its lower boundary; legacy handles without that evidence return unavailable logs. This bridge needs existing OS authorization; CronHarbor does not install broad polkit/D-Bus permissions or recreate units as raw processes. The time filter follows the official [journalctl](https://www.freedesktop.org/software/systemd/man/256/journalctl.html) and [systemd timestamp](https://github.com/systemd/systemd/blob/main/man/systemd.time.xml) contracts; a live hardened-unit drill is still required for each deployment.
+The systemd bridge controls only exact allowlisted existing `.service` units. Existing units retain their execution environment, credentials, AppArmor, filesystem and cgroup protections. Unit manifests reject native command/env/limit settings instead of silently ignoring them. Scheduled v2 journal capture also filters the exact persisted `_SYSTEMD_INVOCATION_ID`; logical Services retain unit context. Journal capture uses the persisted start-intent time as its lower boundary; legacy handles without that evidence return unavailable logs. This bridge needs existing OS authorization; CronHarbor does not install broad polkit/D-Bus permissions or recreate units as raw processes. The time filter follows the official [journalctl](https://www.freedesktop.org/software/systemd/man/256/journalctl.html) and [systemd timestamp](https://github.com/systemd/systemd/blob/main/man/systemd.time.xml) contracts; a live hardened-unit drill is still required for each deployment.
 
 Terminal unit outcomes use systemd's `Result` with validated `ExecMainCode` and `ExecMainStatus`. A timeout remains a failure even with status zero; configured successful nonzero exits or clean signals remain successful. Incomplete evidence stays UNKNOWN. See the official [service result properties](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [successful exit configuration](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
 

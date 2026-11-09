@@ -1132,7 +1132,11 @@ esac
 "##).unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
         let reference = directory.join("reference-python");
-        fs::write(&reference, "#!/bin/sh\nprintf 'READY\\n'\ncat >/dev/null\n").unwrap();
+        fs::write(
+            &reference,
+            include_str!("../tests/fixtures/systemd-python.sh"),
+        )
+        .unwrap();
         fs::set_permissions(&reference, fs::Permissions::from_mode(0o700)).unwrap();
         let policy = crate::external::ExecutorPolicy {
             systemd_reference_python: reference.to_string_lossy().into_owned(),

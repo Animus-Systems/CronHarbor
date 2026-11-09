@@ -30,8 +30,11 @@ stop) printf inactive > "$0.state";;
 esac
 "#).unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let python = root.join("python");
+    fs::write(&python, include_str!("fixtures/systemd-python.sh")).unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
     let name = binary.to_string_lossy().into_owned();
-    let policy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":name,"scopedUnits":[{"unit":"worker.service","scope":"user"}]})).unwrap();
+    let policy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":name,"systemdReferencePython":python,"scopedUnits":[{"unit":"worker.service","scope":"user"}]})).unwrap();
     (policy, name)
 }
 #[test]
@@ -196,4 +199,64 @@ fn missing_unit_is_rejected_before_start_while_a_lost_enqueue_ack_stays_uncertai
             .lines()
             .any(|line| line == "start")
     );
+}
+
+#[test]
+fn transitional_systemd_states_do_not_publish_unhealthy_service_observations() {
+    let dir = tempfile::tempdir().unwrap();
+    let (policy, binary) = fixture(dir.path());
+    fs::write(format!("{binary}.state"), "active").unwrap();
+    fs::write(format!("{binary}.id"), "33333333333333333333333333333333").unwrap();
+    let handle = external::start_systemd_intent(
+        &policy,
+        &external::systemd_intent(
+            &policy,
+            &SystemdSpec {
+                unit: "worker.service".into(),
+            },
+            true,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for state in ["activating", "reloading"] {
+        fs::write(format!("{binary}.state"), state).unwrap();
+        let observed = external::inspect(&policy, &handle).unwrap();
+        assert_eq!(observed.state, ExternalState::Running);
+        assert_ne!(observed.healthy, Some(false));
+    }
+}
+#[test]
+fn scheduled_journal_capture_filters_out_other_invocations() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut policy, binary) = fixture(dir.path());
+    let journal = dir.path().join("journal");
+    fs::write(&journal,"#!/bin/sh\nfor value in \"$@\"; do if [ \"$value\" = _SYSTEMD_INVOCATION_ID=11111111111111111111111111111111 ]; then printf owned; exit 0; fi; done\nprintf 'owned foreign'\n").unwrap();
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o700)).unwrap();
+    policy.journalctl_binary = journal.to_string_lossy().into_owned();
+    let handle = external::start_systemd(
+        &policy,
+        &SystemdSpec {
+            unit: "worker.service".into(),
+        },
+    )
+    .unwrap();
+    fs::write(format!("{binary}.state"), "inactive").unwrap();
+    assert_eq!(
+        external::logs(&policy, &handle, 100, &[]).unwrap().0,
+        b"owned"
+    );
+}
+#[test]
+fn a_foreign_start_between_preflight_and_enqueue_is_never_owned() {
+    let dir = tempfile::tempdir().unwrap();
+    let (policy, binary) = fixture(dir.path());
+    fs::write(format!("{binary}.foreign-start"), "").unwrap();
+    let result = external::start_systemd(
+        &policy,
+        &SystemdSpec {
+            unit: "worker.service".into(),
+        },
+    );
+    assert_eq!(result.unwrap_err().code, "EXECUTOR_UNAVAILABLE");
 }

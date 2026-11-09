@@ -528,7 +528,7 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                 exit_code: systemd_exit(&properties)
                     .and_then(|(code, status)| (code == 1).then_some(status)),
                 outcome: systemd_outcome(&properties, active),
-                healthy: Some(active == "active"),
+                healthy: (active == "active").then_some(true),
             })
         }
     }
@@ -661,6 +661,14 @@ pub(crate) fn logs_if_current(
                 "--unit".into(),
                 unit.clone(),
             ];
+            if let ExternalHandle::SystemdV2 {
+                service: false,
+                invocation_id: Some(id),
+                ..
+            } = handle
+            {
+                args.push(format!("_SYSTEMD_INVOCATION_ID={id}"));
+            }
             match systemd::authorize(policy, handle)? {
                 SystemdScope::User => args.insert(0, "--user".into()),
                 SystemdScope::System if matches!(handle, ExternalHandle::SystemdV2 { .. }) => {

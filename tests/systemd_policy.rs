@@ -23,10 +23,13 @@ show)
 esac
 "#).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let python = root.join("python");
+    fs::write(&python, include_str!("fixtures/systemd-python.sh")).unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
     path.to_string_lossy().into_owned()
 }
 fn scoped(binary: &str, scope: &str) -> ExecutorPolicy {
-    serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,
+    serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,"systemdReferencePython":Path::new(&binary).with_file_name("python"),
       "scopedUnits":[{"unit":"worker.service","scope":scope}]}))
     .unwrap()
 }
@@ -76,7 +79,7 @@ fn ambiguous_scope_or_legacy_collision_is_refused_before_any_effect() {
         json!([{"unit":"worker.service","scope":"user"},{"unit":"worker.service","scope":"user"}]),
     ] {
         let policy: ExecutorPolicy = serde_json::from_value(
-            json!({"systemdEnabled":true,"systemctlBinary":binary,"scopedUnits":entries}),
+            json!({"systemdEnabled":true,"systemctlBinary":binary,"systemdReferencePython":Path::new(&binary).with_file_name("python"),"scopedUnits":entries}),
         )
         .unwrap();
         assert!(
@@ -89,7 +92,7 @@ fn ambiguous_scope_or_legacy_collision_is_refused_before_any_effect() {
             .is_err()
         );
     }
-    let policy:ExecutorPolicy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,"units":["worker.service"],"scopedUnits":[{"unit":"worker.service","scope":"system"}]})).unwrap();
+    let policy:ExecutorPolicy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,"systemdReferencePython":Path::new(&binary).with_file_name("python"),"units":["worker.service"],"scopedUnits":[{"unit":"worker.service","scope":"system"}]})).unwrap();
     assert!(
         external::start_systemd(
             &policy,
@@ -126,7 +129,7 @@ fn evaluation_shutdown_grace_accepts_nine_hundred_and_rejects_nine_hundred_one()
 fn legacy_handle_requires_an_explicit_manager_baseline_before_observation() {
     let root = tempfile::tempdir().unwrap();
     let binary = helper(root.path());
-    let policy:ExecutorPolicy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,"systemdUser":true,"units":["worker.service"]})).unwrap();
+    let policy:ExecutorPolicy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,"systemdReferencePython":Path::new(&binary).with_file_name("python"),"systemdUser":true,"units":["worker.service"]})).unwrap();
     let handle = ExternalHandle::Systemd {
         unit: "worker.service".into(),
         since_us: Some(cronharbor::now_us()),
@@ -138,7 +141,7 @@ fn legacy_handle_requires_an_explicit_manager_baseline_before_observation() {
 fn legacy_manager_baseline_cannot_follow_a_changed_global_manager() {
     let root = tempfile::tempdir().unwrap();
     let binary = helper(root.path());
-    let mut policy:ExecutorPolicy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,"systemdUser":true,"legacySystemdScope":"user","units":["worker.service"]})).unwrap();
+    let mut policy:ExecutorPolicy=serde_json::from_value(json!({"systemdEnabled":true,"systemctlBinary":binary,"systemdReferencePython":Path::new(&binary).with_file_name("python"),"systemdUser":true,"legacySystemdScope":"user","units":["worker.service"]})).unwrap();
     let handle = ExternalHandle::Systemd {
         unit: "worker.service".into(),
         since_us: Some(cronharbor::now_us()),

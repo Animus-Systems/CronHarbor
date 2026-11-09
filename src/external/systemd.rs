@@ -201,6 +201,58 @@ pub(super) fn start(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<
             "The unit has an unresolved transition",
         ));
     }
+    if !service {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Receipt {
+            kind: String,
+            invocation_id: Option<String>,
+            job_id: Option<u32>,
+        }
+        let output = super::run_with_user_bus(
+            &policy.systemd_reference_python,
+            &[
+                "-I".into(),
+                "-u".into(),
+                "-c".into(),
+                include_str!("systemd_start.py").into(),
+                if *scope == SystemdScope::User {
+                    "user"
+                } else {
+                    "system"
+                }
+                .into(),
+                unit.clone(),
+            ],
+            std::time::Duration::from_secs(12),
+            *scope == SystemdScope::User,
+        )?;
+        if !output.success || output.truncated {
+            return Err(super::unavailable());
+        }
+        let receipt: Receipt =
+            serde_json::from_slice(&output.stdout).map_err(|_| super::unavailable())?;
+        if receipt.kind == "rejected" {
+            return Err(crate::Error::new(
+                "START_REJECTED",
+                "Scheduled unit start frontier prerequisites are unavailable",
+            ));
+        }
+        if receipt.kind != "started" || receipt.job_id.is_none_or(|id| id == 0) {
+            return Err(super::unavailable());
+        }
+        let id = receipt
+            .invocation_id
+            .filter(|id| valid_invocation(id))
+            .ok_or_else(super::unavailable)?;
+        return Ok(ExternalHandle::SystemdV2 {
+            unit: unit.clone(),
+            scope: *scope,
+            since_us: *since_us,
+            service: false,
+            invocation_id: Some(id),
+        });
+    }
     let result = super::systemctl_handle(
         policy,
         handle,

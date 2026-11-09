@@ -23,6 +23,7 @@ def main():
    (root/(label+'.duration')).write_text('0' if label=='job' else '300')
    name=tag+'-'+label+'.service';path=units/name;assert not path.exists()
    body='[Unit]\nDescription=Disposable Cron Harbor executor proof\n[Service]\nType='+('oneshot' if label=='job' else 'simple')+'\nExecStart=/usr/bin/python3 '+str(worker)+' '+str(root/(label+'.effects'))+' '+str(root/(label+'.duration'))+'\nNoNewPrivileges=true\nMemoryMax=64M\nTasksMax=16\nTimeoutStopSec=5\n'
+   if label=='service': body+='Restart=on-failure\nRestartSec=2\n'
    path.write_text(body);path.chmod(0o600);created.append((name,path,hashlib.sha256(body.encode()).hexdigest()))
   job_unit,service_unit=[row[0] for row in created]
   policy={'systemdEnabled':True,'scopedUnits':[{'unit':name,'scope':'user'} for name,_,_ in created]}
@@ -68,6 +69,16 @@ def main():
    assert (root/'service.effects').read_text()=='1'
    stop();assert system('show',service_unit,'--property=MainPID','--value')==pid;boot();wait(lambda:current('service')['observed_state']=='READY')
    assert system('show',service_unit,'--property=MainPID','--value')==pid and (root/'service.effects').read_text()=='1'
+   history=cli('executions','list','--workload-id',current('service')['id'])
+   assert len(history['items'])==1
+   system('kill','--signal=KILL',service_unit)
+   wait(lambda:current('service')['observed_state']=='STARTING')
+   wait(lambda:system('show',service_unit,'--property=MainPID','--value') not in ('0',pid))
+   wait(lambda:current('service')['observed_state']=='READY')
+   assert (root/'service.effects').read_text()=='2'
+   assert cli('executions','list','--workload-id',current('service')['id'])==history
+   assert system('show',service_unit,'--property=NRestarts','--value')=='1'
+   assert system('show',service_unit,'--property=InvocationID','--value')!=invocation
    operation=cli('services','stop','proof/service');wait(lambda:cli('operations','inspect',operation['id'])['state']=='SUCCEEDED')
    assert system('show',service_unit,'--property=ActiveState','--value')=='inactive'
    assert cli('status')['unknown']==0
@@ -76,10 +87,10 @@ def main():
     old=args.old_binary.resolve(strict=True);assert hashlib.sha256(old.read_bytes()).digest()!=hashlib.sha256(binary.read_bytes()).digest()
     stop();policy_path=state/'executors.json';policy_path.write_text(json.dumps({'systemdEnabled':False}))
     boot(old);assert cli('status')['unknown']==0 and cli('status')['active']==0
-    assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='1'
+    assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='2'
     stop();policy_path.write_text(json.dumps(policy));boot();assert cli('status')['unknown']==0 and cli('status')['active']==0
-    assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='1';rollback=True
-   print(json.dumps({'check':'real-user-systemd','status':'pass','fastJob':True,'longOneshotSeconds':16,'serviceAdoptedWithoutRestart':True,'ownerRestartReattached':True,'serviceStoppedWithReceipt':True,'unknown':0,'quiescentOldBinaryRollback':rollback}))
+    assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='2';rollback=True
+   print(json.dumps({'check':'real-user-systemd','status':'pass','fastJob':True,'longOneshotSeconds':16,'serviceAdoptedWithoutRestart':True,'ownerRestartReattached':True,'osRestartRetainedSameOwner':True,'serviceStoppedWithReceipt':True,'unknown':0,'quiescentOldBinaryRollback':rollback}))
   finally:
    try:stop()
    finally:

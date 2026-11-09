@@ -227,8 +227,12 @@ esac
     )
     .unwrap();
     fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+    let python = directory.path().join("python");
+    fs::write(&python, include_str!("fixtures/systemd-python.sh")).unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
     let policy = ExecutorPolicy {
         systemd_enabled: true,
+        systemd_reference_python: python.to_string_lossy().into_owned(),
         systemctl_binary: systemctl.to_str().unwrap().into(),
         systemd_user: true,
         legacy_systemd_scope: Some(cronharbor::external::SystemdScope::User),
