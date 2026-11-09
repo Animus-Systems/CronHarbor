@@ -12,7 +12,8 @@ default = []
 api = ["dep:axum", "dep:tokio", "dep:tokio-stream", "dep:tower", "dep:tower-http", "webhooks"]
 webhooks = ["dep:reqwest", "dep:tokio", "dep:rustls"]
 mcp = ["dep:rmcp", "dep:tokio"]
-full = ["api", "mcp"]
+http-probes = ["dep:reqwest", "dep:tokio"]
+full = ["api", "mcp", "http-probes"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

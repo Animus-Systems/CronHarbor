@@ -130,6 +130,27 @@ Unresolved UNKNOWN logs remain protected from retention and still consume the co
 
 ## External executors and trust
 
+### HTTP readiness for a systemd Service
+
+Full builds include `http-probes`; another build can enable that feature explicitly.
+Core without that feature rejects HTTP readiness rather than ignoring it. Existing
+native exec probes and systemd Services without HTTP probes retain their behavior.
+
+`service.httpReadiness` accepts `url`, `status`, `check`, `intervalSeconds`,
+`timeoutSeconds`, `failureThreshold` and `successThreshold`. `check` is one of
+`{"type":"status"}`, `{"type":"html"}`, or
+`{"type":"json","equals":{"ok":true},"nonemptyArrays":[]}`. JSON assertions
+match top-level scalar values or nonempty arrays, with eight checks maximum.
+HTTP readiness and native exec readiness cannot be combined.
+
+The private executor policy must include an exact `systemdHttpReadiness` entry
+`{unit,scope,url,status,check}` matching the existing scoped unit and workload.
+No endpoint or response assertion can be weakened by editing the workload alone.
+Only plain HTTP to literal loopback addresses with explicit ports is supported.
+GET requests use no proxy, redirect, credential, cookie or automatic retry.
+Responses are capped at 64 KiB, URLs at 2048 bytes, and the total request timeout
+at 1–10 seconds. A status check does not prove database or business health.
+
 Copy the policy shape from `examples/optional/executors.json` to `STATE_DIR/executors.json`, owned by the daemon user with mode 0600. Enable only the adapter and exact targets required.
 
 Docker execution requires an explicit local Unix daemon connection and digest-pinned image allowlist. Admission fixes non-root container UID, network allowlist, read-only filesystem, dropped capabilities, no-new-privileges, memory/PID/CPU limits and bounded Docker logs. Workload manifests cannot request host mounts, privileged mode or host networking. Immutable labels bind instance/workload/revision/execution/launch identity; reconnect never adopts an object with mismatched labels. Owned terminal containers are removed only after durable outcome and successful log capture. A Docker daemon outage yields uncertainty, not success or blind replay. Access to a privileged Docker daemon remains high authority, even when CronHarbor itself is non-root.

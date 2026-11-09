@@ -1,5 +1,5 @@
 //! Explicitly enabled, allowlisted external lifecycle adapters.
-mod systemd;
+pub(crate) mod systemd;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -49,6 +49,8 @@ pub struct ExecutorPolicy {
     pub legacy_systemd_scope: Option<SystemdScope>,
     pub units: Vec<String>,
     pub scoped_units: Vec<ScopedSystemdUnit>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub systemd_http_readiness: Vec<crate::http_readiness::SystemdHttpReadinessPolicy>,
 }
 impl Default for ExecutorPolicy {
     fn default() -> Self {
@@ -68,6 +70,7 @@ impl Default for ExecutorPolicy {
             legacy_systemd_scope: None,
             units: Vec::new(),
             scoped_units: Vec::new(),
+            systemd_http_readiness: Vec::new(),
         }
     }
 }
@@ -172,6 +175,7 @@ pub fn load_policy(directory: &Path) -> Result<ExecutorPolicy> {
         }
     }
     systemd::validate(&policy)?;
+    crate::http_readiness::validate_policy(&policy)?;
     Ok(policy)
 }
 

@@ -261,6 +261,8 @@ pub struct Service {
     pub stop_grace_seconds: u64,
     pub startup_grace_seconds: u64,
     pub readiness: Option<Probe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_readiness: Option<crate::http_readiness::HttpReadiness>,
     pub liveness: Option<Probe>,
     pub restart_on_unhealthy: bool,
 }
@@ -277,6 +279,7 @@ impl Default for Service {
             stop_grace_seconds: 1,
             startup_grace_seconds: 10,
             readiness: None,
+            http_readiness: None,
             liveness: None,
             restart_on_unhealthy: false,
         }
@@ -648,6 +651,14 @@ impl Manifest {
             ));
         }
         let svc = &s.service;
+        if let Some(probe) = &svc.http_readiness {
+            if self.kind != "Service" || e.adapter != "systemd" || svc.readiness.is_some() {
+                return Err(invalid(
+                    "HTTP readiness requires a systemd Service without exec readiness",
+                ));
+            }
+            crate::http_readiness::validate(probe)?;
+        }
         if !matches!(svc.desired_state.as_str(), "RUNNING" | "STOPPED")
             || !matches!(svc.restart.as_str(), "never" | "on-failure" | "always")
             || svc.max_restarts > 1000

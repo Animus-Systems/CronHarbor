@@ -6,6 +6,7 @@ pub mod application;
 pub mod config;
 pub mod contracts;
 pub mod external;
+pub mod http_readiness;
 pub mod importer;
 pub mod logs;
 #[cfg(feature = "mcp")]

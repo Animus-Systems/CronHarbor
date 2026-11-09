@@ -60,7 +60,7 @@ pub(super) fn resolve(policy: &ExecutorPolicy, unit: &str) -> Result<SystemdScop
     }
     Err(policy_error())
 }
-pub(super) fn authorize(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<SystemdScope> {
+pub(crate) fn authorize(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<SystemdScope> {
     match handle {
         ExternalHandle::Systemd { unit, .. } => {
             if !policy.units.contains(unit) {
