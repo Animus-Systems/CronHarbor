@@ -197,6 +197,7 @@ mod enabled {
         let (_dir, mut store, mut manifest, at) = setup("Service");
         let first = store.claim_due(at).unwrap().unwrap();
         store.start_requested(&first.attempt_id, at).unwrap();
+        store.running(&first, 12345, at).unwrap();
         store
             .service_observation(&first, "STARTING", at + 1)
             .unwrap();
@@ -243,6 +244,7 @@ mod enabled {
         .unwrap();
         let second = store.claim_due(at + 6).unwrap().unwrap();
         store.start_requested(&second.attempt_id, at + 6).unwrap();
+        store.running(&second, 12346, at + 6).unwrap();
         store.service_observation(&second, "READY", at + 7).unwrap();
         let rows = items(&store);
         assert_eq!(rows.len(), 2);

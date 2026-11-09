@@ -37,6 +37,42 @@ fn failure() -> Outcome {
 }
 
 #[test]
+fn delayed_readiness_does_not_override_a_stopped_or_replaced_service() {
+    for stop in [true, false] {
+        let (_directory, mut store, mut manifest) = setup("Service");
+        store.apply(&manifest, 1).unwrap();
+        let launch = store.claim_due(2).unwrap().unwrap();
+        store.start_requested(&launch.attempt_id, 2).unwrap();
+        store.running(&launch, 12345, 3).unwrap();
+        if stop {
+            call(
+                &mut store,
+                AppCommand::ServiceDesired {
+                    id: "local/hello".into(),
+                    desired_state: "STOPPED".into(),
+                    expected_revision: None,
+                    idempotency_key: "stop-before-late-probe".into(),
+                },
+            );
+        } else {
+            manifest.spec.service.startup_grace_seconds += 1;
+            store.apply(&manifest, 4).unwrap();
+        }
+        store.service_observation(&launch, "READY", 5).unwrap();
+        let state: String = rusqlite::Connection::open(store.directory.join("state.db"))
+            .unwrap()
+            .query_row("SELECT observed_state FROM service_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_ne!(
+            state, "READY",
+            "obsolete readiness replaced stop/revision state"
+        );
+    }
+}
+
+#[test]
 fn exhausted_service_start_and_restart_operations_fail_with_the_observed_cause() {
     for restart in [false, true] {
         let (_directory, mut store, mut manifest) = setup("Service");

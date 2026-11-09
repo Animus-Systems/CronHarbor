@@ -15,6 +15,27 @@ async function connect(page: Page, token: string): Promise<void> {
     page.getByRole("heading", { name: "Overview.", exact: true }),
   ).toBeVisible();
 }
+test("real API: editing a stopped systemd Service preserves HTTP readiness", async ({page}) => {
+  test.skip(!admin, "A disposable API Admin token is required.");
+  await connect(page,admin);
+  const name=`http-roundtrip-${Date.now()}`;
+  const httpReadiness={url:"http://127.0.0.1:9/health",status:200,check:{type:"json",equals:{ok:true}},intervalSeconds:15,timeoutSeconds:3,failureThreshold:3,successThreshold:2};
+  await page.goto("/#/jobs/new?kind=Service");
+  const editor=page.getByLabel("Workload YAML definition");
+  await editor.fill(JSON.stringify({apiVersion:"cronharbor.dev/v1",kind:"Service",metadata:{name,namespace:"default"},spec:{owner:"api",enabled:false,execution:{adapter:"systemd",systemd:{unit:"browser-http-proof.service"}},service:{desiredState:"STOPPED",restart:"never",httpReadiness}}}));
+  await page.getByRole("button",{name:"Validate & review plan"}).click();
+  await expect(page.getByRole("heading",{name:"Review proposed revision"})).toBeVisible();
+  await page.getByRole("button",{name:"Review impact & apply"}).click();
+  await page.getByRole("button",{name:"Apply reviewed revision",exact:true}).click();
+  await expect(page.getByRole("heading",{name:"Operation detail"})).toBeVisible();
+  await expect(page.getByText("The requested operation completed.",{exact:false})).toBeVisible();
+  await page.getByRole("link",{name:"Services",exact:true}).click();
+  await page.getByRole("link",{name,exact:true}).click();
+  const edit=page.getByRole("link",{name:"Edit definition",exact:true});
+  await edit.click();
+  const value:unknown=JSON.parse(await page.getByLabel("Workload YAML definition").inputValue());
+  expect(value).toMatchObject({spec:{enabled:false,service:{desiredState:"STOPPED",httpReadiness}}});
+});
 test("authentication is keyboard accessible and tokens are memory only", async ({
   page,
 }) => {

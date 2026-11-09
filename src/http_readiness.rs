@@ -287,3 +287,103 @@ fn matches_body(check: &HttpResponseCheck, content_type: &str, body: &[u8]) -> b
         }
     }
 }
+
+pub(crate) struct ReadinessState {
+    spec: HttpReadiness,
+    startup_grace: std::time::Duration,
+    started: std::time::Instant,
+    next_probe: std::time::Instant,
+    invocation_id: Option<String>,
+    healthy: Option<bool>,
+    unit_ready: bool,
+    failures: u32,
+    successes: u32,
+    last_sample: Option<std::time::Instant>,
+    events: Vec<crate::contracts::ProbeEventDto>,
+}
+
+impl ReadinessState {
+    pub(crate) fn new(spec: HttpReadiness, grace: u64) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            spec,
+            startup_grace: std::time::Duration::from_secs(grace),
+            started: now,
+            next_probe: now,
+            invocation_id: None,
+            healthy: None,
+            unit_ready: false,
+            failures: 0,
+            successes: 0,
+            last_sample: None,
+            events: Vec::new(),
+        }
+    }
+    pub(crate) fn due(&self, now: std::time::Instant) -> bool {
+        now >= self.next_probe
+    }
+    pub(crate) fn observe(
+        &mut self,
+        invocation: Option<String>,
+        unit_ready: bool,
+        sample: Option<bool>,
+        now: std::time::Instant,
+    ) -> Option<bool> {
+        if invocation != self.invocation_id {
+            self.invocation_id = invocation;
+            self.started = now;
+            self.next_probe = now;
+            self.healthy = None;
+            self.failures = 0;
+            self.successes = 0;
+            self.last_sample = None;
+        }
+        self.unit_ready = unit_ready;
+        if let Some(passed) = sample {
+            self.last_sample = Some(now);
+            self.next_probe = now + std::time::Duration::from_secs(self.spec.interval_seconds);
+            if passed {
+                self.failures = 0;
+                self.successes = self.successes.saturating_add(1);
+                if self.successes >= self.spec.success_threshold {
+                    self.healthy = Some(true);
+                }
+            } else {
+                self.successes = 0;
+                self.failures = self.failures.saturating_add(1);
+                if self.failures >= self.spec.failure_threshold {
+                    self.healthy = Some(false);
+                }
+            }
+            if self.events.len() == 20 {
+                self.events.remove(0);
+            }
+            self.events.push(crate::contracts::ProbeEventDto {
+                kind: "readiness".into(),
+                healthy: passed,
+                observed_at_us: crate::now_us(),
+            });
+        }
+        if self.unit_ready
+            && let Some(healthy) = self.healthy
+        {
+            let fresh = std::time::Duration::from_secs(
+                self.spec.interval_seconds + self.spec.timeout_seconds + 10,
+            );
+            if self
+                .last_sample
+                .is_some_and(|at| now.saturating_duration_since(at) <= fresh)
+            {
+                return Some(healthy);
+            }
+        }
+        if now.saturating_duration_since(self.started) >= self.startup_grace {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn take_events(&mut self) -> Vec<crate::contracts::ProbeEventDto> {
+        std::mem::take(&mut self.events)
+    }
+}

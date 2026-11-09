@@ -120,6 +120,7 @@ pub struct Observation {
     pub exit_code: Option<i32>,
     pub outcome: Option<TerminalOutcome>,
     pub healthy: Option<bool>,
+    pub invocation_id: Option<String>,
 }
 
 fn unavailable() -> Error {
@@ -433,6 +434,7 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                     exit_code: None,
                     outcome: None,
                     healthy: None,
+                    invocation_id: None,
                 });
             }
             let values: Vec<serde_json::Value> =
@@ -476,6 +478,7 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                     }
                 }),
                 healthy,
+                invocation_id: None,
             })
         }
         ExternalHandle::Systemd { unit, .. } | ExternalHandle::SystemdV2 { unit, .. } => {
@@ -509,6 +512,7 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                     exit_code: None,
                     outcome: None,
                     healthy: None,
+                    invocation_id: None,
                 });
             }
             if !output.success || properties.get("LoadState") != Some(&"loaded") {
@@ -517,6 +521,7 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                     exit_code: None,
                     outcome: None,
                     healthy: None,
+                    invocation_id: None,
                 });
             }
             systemd::verify_invocation(handle, &properties)?;
@@ -533,6 +538,10 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                     .and_then(|(code, status)| (code == 1).then_some(status)),
                 outcome: systemd_outcome(&properties, active),
                 healthy: (active == "active").then_some(true),
+                invocation_id: properties
+                    .get("InvocationID")
+                    .filter(|v| !v.is_empty())
+                    .map(|v| (*v).to_owned()),
             })
         }
     }

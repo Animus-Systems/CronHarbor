@@ -151,6 +151,14 @@ GET requests use no proxy, redirect, credential, cookie or automatic retry.
 Responses are capped at 64 KiB, URLs at 2048 bytes, and the total request timeout
 at 1–10 seconds. A status check does not prove database or business health.
 
+The verified unit must be active and the configured success threshold must pass
+before a start operation completes READY. Invocation changes discard prior probe
+streaks. Startup grace or the failure threshold produces UNHEALTHY; later passing
+samples can recover READY. A late sample cannot override a stop, replacement
+revision or retired attempt. Revoked policy or lost executor identity stays
+UNKNOWN. HTTP failure itself does not change the configured restart policy; use
+`restart: never` for a unit whose process recovery already belongs to systemd.
+
 Copy the policy shape from `examples/optional/executors.json` to `STATE_DIR/executors.json`, owned by the daemon user with mode 0600. Enable only the adapter and exact targets required.
 
 Docker execution requires an explicit local Unix daemon connection and digest-pinned image allowlist. Admission fixes non-root container UID, network allowlist, read-only filesystem, dropped capabilities, no-new-privileges, memory/PID/CPU limits and bounded Docker logs. Workload manifests cannot request host mounts, privileged mode or host networking. Immutable labels bind instance/workload/revision/execution/launch identity; reconnect never adopts an object with mismatched labels. Owned terminal containers are removed only after durable outcome and successful log capture. A Docker daemon outage yields uncertainty, not success or blind replay. Access to a privileged Docker daemon remains high authority, even when CronHarbor itself is non-root.

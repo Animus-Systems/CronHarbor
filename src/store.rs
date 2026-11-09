@@ -994,6 +994,10 @@ impl Store {
             return Ok(());
         }
         let tx = self.connection.transaction()?;
+        let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM service_instances si JOIN executions e ON e.workload_id=si.workload_id JOIN attempts a ON a.execution_id=e.id WHERE e.id=?1 AND a.id=?2 AND a.state='RUNNING' AND a.cancel_requested=0 AND si.desired_state='RUNNING' AND si.restart_requested=0 AND si.revision_id=e.revision_id)",params![launch.execution_id,launch.attempt_id],|row|row.get(0))?;
+        if !current {
+            return Ok(());
+        }
         let previous:String=tx.query_row("SELECT observed_state FROM service_instances WHERE workload_id=(SELECT workload_id FROM executions WHERE id=?1)",[&launch.execution_id],|r|r.get(0))?;
         if previous != state {
             let workload: String = tx.query_row(
@@ -1007,7 +1011,7 @@ impl Store {
                 "service.observed",
                 Some(&workload),
                 Some(&launch.execution_id),
-                serde_json::json!({"observed_state":state,"readiness_probe_configured":launch.manifest.spec.service.readiness.is_some()}),
+                serde_json::json!({"observed_state":state,"readiness_probe_configured":launch.manifest.spec.service.readiness.is_some() || launch.manifest.spec.service.http_readiness.is_some()}),
                 now,
             )?;
         }

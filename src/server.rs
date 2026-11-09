@@ -428,11 +428,25 @@ pub fn run_with_settings(
             let stop = store.cancel_requested(&external[index].launch.attempt_id)?
                 || store.service_should_stop(&external[index].launch)?;
             match external[index].poll(stop, &store.directory) {
+                Some(ExternalResult::HttpRunning { .. }) => {
+                    return Err(Error::new(
+                        "INTERNAL_ERROR",
+                        "HTTP readiness observation was not processed",
+                    ));
+                }
                 Some(ExternalResult::Retired) => {
                     external_deadlines.remove(&external[index].launch.attempt_id);
                     external.swap_remove(index);
                 }
                 Some(ExternalResult::Running(healthy)) => {
+                    let events = external[index]
+                        .http_readiness
+                        .as_mut()
+                        .map(|state| state.take_events())
+                        .unwrap_or_default();
+                    if !stop {
+                        store.record_probe_events(&external[index].launch, &events)?;
+                    }
                     if store.attempt_is_unknown(&external[index].launch.attempt_id)? {
                         let encoded = serde_json::to_string(&external[index].handle)
                             .map_err(|_| transport_error())?;
@@ -723,7 +737,12 @@ fn dispatch(
             .as_ref()
             .ok_or_else(|| Error::new("CONFIG_INVALID", "Missing systemd specification"))?;
         let prepared = crate::external::load_policy(&store.directory).and_then(|policy| {
-            crate::external::systemd_intent(&policy, spec, launch.manifest.kind == "Service")
+            let handle =
+                crate::external::systemd_intent(&policy, spec, launch.manifest.kind == "Service")?;
+            if let Some(probe) = &launch.manifest.spec.service.http_readiness {
+                crate::http_readiness::authorize(&policy, &handle, probe)?;
+            }
+            Ok(handle)
         });
         match prepared {
             Ok(handle) => handle,
@@ -754,10 +773,14 @@ fn dispatch(
     let secrets = Some(crate::process::secret_values(&execution, &env));
     let directory = store.directory.clone();
     let prepared_handle = handle.clone();
+    let http_readiness = launch.manifest.spec.service.http_readiness.clone();
     let task = thread::spawn(move || {
         let mut reference = None;
         let result = (|| {
             let policy = crate::external::load_policy(&directory)?;
+            if let Some(probe) = &http_readiness {
+                crate::http_readiness::authorize(&policy, &prepared_handle, probe)?;
+            }
             if let Some(docker) = execution.docker {
                 crate::external::start_docker(
                     &policy,
@@ -795,9 +818,15 @@ fn dispatch(
 enum ExternalResult {
     Retired,
     Running(Option<bool>),
+    HttpRunning {
+        invocation: Option<String>,
+        unit_ready: bool,
+        sample: Option<bool>,
+    },
     Finished(Outcome, Option<Vec<u8>>),
 }
 struct ExternalWatch {
+    http_readiness: Option<crate::http_readiness::ReadinessState>,
     reference: Arc<Mutex<Option<crate::external::SystemdReference>>>,
     retired: Arc<AtomicBool>,
     launch: Launch,
@@ -833,6 +862,18 @@ impl ExternalWatch {
         deadline: Option<Instant>,
     ) -> Self {
         Self {
+            http_readiness: launch
+                .manifest
+                .spec
+                .service
+                .http_readiness
+                .clone()
+                .map(|spec| {
+                    crate::http_readiness::ReadinessState::new(
+                        spec,
+                        launch.manifest.spec.service.startup_grace_seconds,
+                    )
+                }),
             reference: Arc::new(Mutex::new(None)),
             retired: Arc::new(AtomicBool::new(false)),
             launch,
@@ -858,9 +899,27 @@ impl ExternalWatch {
         {
             let task = self.task.take()?;
             self.next = now + Duration::from_secs(1);
-            return Some(task.join().unwrap_or_else(|_| {
+            let result = task.join().unwrap_or_else(|_| {
                 ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None)
-            }));
+            });
+            return Some(match result {
+                ExternalResult::HttpRunning {
+                    invocation,
+                    unit_ready,
+                    sample,
+                } => {
+                    let healthy = self.http_readiness.as_mut().and_then(|state| {
+                        state.observe(
+                            invocation,
+                            unit_ready,
+                            if self.stopping { None } else { sample },
+                            now,
+                        )
+                    });
+                    ExternalResult::Running(healthy)
+                }
+                other => other,
+            });
         }
         if self.task.is_some() || now < self.next {
             return None;
@@ -882,6 +941,11 @@ impl ExternalWatch {
             .collect::<Vec<_>>();
         let cap = self.launch.manifest.spec.logs.max_run_bytes.min(1_048_576);
         let grace = self.launch.manifest.spec.service.stop_grace_seconds;
+        let http_spec = self.launch.manifest.spec.service.http_readiness.clone();
+        let probe_due = self
+            .http_readiness
+            .as_ref()
+            .is_some_and(|state| state.due(now));
         let stop_state = if self.timed_out {
             EndState::TimedOut
         } else {
@@ -936,18 +1000,61 @@ impl ExternalWatch {
                     }
                 }
             }
-            let observed = match crate::external::inspect(&policy, &handle) {
+            let mut observed = match crate::external::inspect(&policy, &handle) {
                 Ok(value) => value,
                 Err(_) => {
                     return ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None);
                 }
             };
+            let mut http_sample = None;
+            if !stopping && let Some(spec) = &http_spec {
+                if crate::http_readiness::authorize(&policy, &handle, spec).is_err() {
+                    return ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None);
+                }
+                if probe_due
+                    && observed.state == crate::external::ExternalState::Running
+                    && observed.healthy == Some(true)
+                {
+                    let before = observed.invocation_id.clone();
+                    let checked = crate::http_readiness::probe(&policy, &handle, spec);
+                    let current_policy = crate::external::load_policy(&directory);
+                    let current = current_policy.and_then(|policy| {
+                        crate::http_readiness::authorize(&policy, &handle, spec)?;
+                        crate::external::inspect(&policy, &handle)
+                    });
+                    match (checked, current) {
+                        (Ok(healthy), Ok(after)) => {
+                            if before.is_some()
+                                && before == after.invocation_id
+                                && after.healthy == Some(true)
+                            {
+                                http_sample = Some(healthy);
+                            }
+                            observed = after;
+                        }
+                        _ => {
+                            return ExternalResult::Finished(
+                                unknown_outcome("EXECUTOR_UNAVAILABLE"),
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
             if retired.load(Ordering::Relaxed) {
                 return ExternalResult::Retired;
             }
             match observed.state {
                 crate::external::ExternalState::Running => {
-                    ExternalResult::Running(observed.healthy)
+                    if http_spec.is_some() && !stopping {
+                        ExternalResult::HttpRunning {
+                            invocation: observed.invocation_id,
+                            unit_ready: observed.healthy == Some(true),
+                            sample: http_sample,
+                        }
+                    } else {
+                        ExternalResult::Running(observed.healthy)
+                    }
                 }
                 crate::external::ExternalState::Unknown => {
                     ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None)
