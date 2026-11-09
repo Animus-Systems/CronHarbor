@@ -152,6 +152,13 @@ fn active_service_with_a_nil_invocation_cannot_be_adopted() {
     )
     .unwrap();
     assert!(external::start_systemd_intent(&policy, &intent).is_err());
+    fs::write(format!("{binary}.id"), "").unwrap();
+    assert_eq!(
+        external::start_systemd_intent(&policy, &intent)
+            .unwrap_err()
+            .code,
+        "START_REJECTED"
+    );
 }
 
 #[test]

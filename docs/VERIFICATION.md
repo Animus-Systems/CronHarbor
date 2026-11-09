@@ -356,3 +356,10 @@ stop, with zero UNKNOWN. It used disposable units and private state only. Existi
 Python dbus references retain completed oneshot evidence; permanent Services need
 no extra RefUnit authority. Compose validation passed. Optimized release, packaged
 container acceptance, integrated review and live four-unit handover remain pending.
+
+The real user-systemd drill also passed quiescent rollback to the existing v0.11.0
+binary and back, preserving synthetic counters and execution history. A stuck
+metadata-reference helper regression reproduced excessive serialized shutdown
+cleanup; cleanup is now bounded to 100 ms per reference, leaving headroom for
+the 900-second service drain. An active unit with no invocation receipt is rejected
+before any StartUnit request rather than manufacturing an uncertain launch.

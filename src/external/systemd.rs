@@ -179,7 +179,12 @@ pub(super) fn start(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<
                 "The unit already has running work",
             ));
         }
-        let id = previous.ok_or_else(super::unavailable)?;
+        let id = previous.ok_or_else(|| {
+            crate::Error::new(
+                "START_REJECTED",
+                "Cannot adopt an unverified service invocation",
+            )
+        })?;
         return Ok(ExternalHandle::SystemdV2 {
             unit: unit.clone(),
             scope: *scope,
@@ -276,7 +281,7 @@ pub(crate) struct SystemdReference(std::process::Child);
 impl Drop for SystemdReference {
     fn drop(&mut self) {
         drop(self.0.stdin.take());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
         loop {
             match self.0.try_wait() {
                 Ok(Some(_)) => return,
@@ -388,6 +393,30 @@ mod reference_tests {
             fs::read_to_string(python.with_extension("closed")).unwrap(),
             "closed"
         );
+    }
+    #[test]
+    fn stuck_reference_cleanup_leaves_room_for_a_900_second_service_drain() {
+        let root = tempfile::tempdir().unwrap();
+        let python = root.path().join("python");
+        fs::write(
+            &python,
+            "#!/bin/sh\nprintf 'READY\\n'\nexec /bin/sleep 10\n",
+        )
+        .unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
+        let policy:ExecutorPolicy=serde_json::from_value(serde_json::json!({"systemdEnabled":true,"systemdReferencePython":python,"scopedUnits":[{"unit":"proof.service","scope":"user"}]})).unwrap();
+        let handle = intent(
+            &policy,
+            &super::super::SystemdSpec {
+                unit: "proof.service".into(),
+            },
+            false,
+        )
+        .unwrap();
+        let reference = reference(&policy, &handle).unwrap();
+        let began = std::time::Instant::now();
+        drop(reference);
+        assert!(began.elapsed() < std::time::Duration::from_millis(500));
     }
     #[test]
     fn persistent_services_need_no_metadata_reference_or_extra_system_authority() {

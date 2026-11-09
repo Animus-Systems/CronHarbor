@@ -4,7 +4,7 @@ import argparse,hashlib,json,os,signal,subprocess,tempfile,time,uuid
 from pathlib import Path
 
 def main():
- parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,required=True);args=parser.parse_args()
+ parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,required=True);parser.add_argument('--old-binary',type=Path);args=parser.parse_args()
  binary=args.binary.resolve(strict=True);assert os.getuid()!=0,'Use the user manager, not root'
  tag='cronharbor-proof-'+uuid.uuid4().hex[:12]
  units=Path.home()/'.config/systemd/user';created=[];daemon=None;log=None
@@ -31,9 +31,9 @@ def main():
    r=subprocess.run([str(binary),'--state-dir',str(state),*values],capture_output=True,text=True,timeout=15)
    if check:assert r.returncode==0,'Fixture CLI failed: '+r.stderr
    return json.loads(r.stdout) if r.returncode==0 else None
-  def boot():
+  def boot(selected=binary):
    nonlocal daemon,log
-   log=(root/'daemon.log').open('a');daemon=subprocess.Popen([str(binary),'--state-dir',str(state),'server'],stdout=log,stderr=subprocess.STDOUT)
+   log=(root/'daemon.log').open('a');daemon=subprocess.Popen([str(selected),'--state-dir',str(state),'server'],stdout=log,stderr=subprocess.STDOUT)
    wait(lambda:daemon.poll() is None and (state/'control.sock').exists() and cli('status',check=False))
   def stop():
    nonlocal daemon,log
@@ -71,7 +71,15 @@ def main():
    operation=cli('services','stop','proof/service');wait(lambda:cli('operations','inspect',operation['id'])['state']=='SUCCEEDED')
    assert system('show',service_unit,'--property=ActiveState','--value')=='inactive'
    assert cli('status')['unknown']==0
-   print(json.dumps({'check':'real-user-systemd','status':'pass','fastJob':True,'longOneshotSeconds':16,'serviceAdoptedWithoutRestart':True,'ownerRestartReattached':True,'serviceStoppedWithReceipt':True,'unknown':0}))
+   rollback=False
+   if args.old_binary:
+    old=args.old_binary.resolve(strict=True);assert hashlib.sha256(old.read_bytes()).digest()!=hashlib.sha256(binary.read_bytes()).digest()
+    stop();policy_path=state/'executors.json';policy_path.write_text(json.dumps({'systemdEnabled':False}))
+    boot(old);assert cli('status')['unknown']==0 and cli('status')['active']==0
+    assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='1'
+    stop();policy_path.write_text(json.dumps(policy));boot();assert cli('status')['unknown']==0 and cli('status')['active']==0
+    assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='1';rollback=True
+   print(json.dumps({'check':'real-user-systemd','status':'pass','fastJob':True,'longOneshotSeconds':16,'serviceAdoptedWithoutRestart':True,'ownerRestartReattached':True,'serviceStoppedWithReceipt':True,'unknown':0,'quiescentOldBinaryRollback':rollback}))
   finally:
    try:stop()
    finally:
