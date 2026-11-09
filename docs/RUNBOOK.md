@@ -364,3 +364,10 @@ python3 scripts/test_full.py --browser
 ```
 
 On Linux, Playwright's `npx playwright install --with-deps chromium` also installs required system libraries. Build the full debug binary immediately before `test_full.py`, or point `CRONHARBOR_BINARY` to a preserved full-feature artifact. Cargo builds with different feature sets share the default binary path. Docker adapter acceptance additionally uses `scripts/test_docker_executor.py` with an explicitly supplied test daemon and digest-pinned image. Run generated-contract comparisons, dependency audits and the appropriate container checks locally too; execution evidence is recorded separately from workflow configuration.
+
+A busy event stream refreshes dashboard snapshots at most once per five seconds.
+HTTP 429 pauses that tab's API client according to the bounded Retry-After window,
+including event reconnects and attempted writes; mutations are never retried
+without an explicit user action. Tabs using the same token share its server-side
+request quota. After a UI repair, reload the tab and connect again to load the new
+assets. An existing server rate window can take up to one minute to clear.

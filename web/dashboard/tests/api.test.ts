@@ -179,3 +179,29 @@ describe("credential metadata shape", () => {
     }
   });
 });
+
+describe("rate-limit cooldown", () => {
+  it("shares Retry-After between reads, streams and writes without automatic submission", async () => {
+    let now = 1000;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response("", { status: 429, headers: { "Retry-After": "60" } })).mockResolvedValue(new Response(JSON.stringify(operation)));
+    vi.stubGlobal("fetch", fetcher);
+    const api = new ApiClient("https://example.com/api/v1", "private");
+    try {
+      await expect(api.get("/operations/op", isOperation)).rejects.toMatchObject({ status: 429, retryAfterMs: 60000 });
+      now += 5000;
+      await expect(api.get("/operations/op", isOperation)).rejects.toMatchObject({ retryAfterMs: 55000 });
+      await expect(api.stream("", new AbortController().signal)).rejects.toMatchObject({ status: 429 });
+      await expect(api.post("/jobs/test/run", {}, isOperation, "one-intent")).rejects.toMatchObject({ status: 429 });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      now += 55000;
+      expect(await api.get("/operations/op", isOperation)).toEqual(operation);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally { clock.mockRestore(); }
+  });
+  it.each([null, "invalid", "999999999999999999999999", "-1", "600000"])("bounds an unusable Retry-After header %s", async (value) => {
+    const headers = new Headers(); if (value !== null) headers.set("Retry-After", value);
+    vi.stubGlobal("fetch", async () => new Response("", { status: 429, headers }));
+    await expect(new ApiClient("https://example.com/api/v1", "private").get("/operations/op", isOperation)).rejects.toMatchObject({ retryAfterMs: 60000 });
+  });
+});

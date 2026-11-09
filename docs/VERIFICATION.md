@@ -376,3 +376,34 @@ quiescent old/new rollback. A separate real D-Bus race returned uncertainty and
 left the foreign invocation running. These fixtures touched no business workers.
 The live root PDF authorization and four-family deployment remain operator gates;
 no paid qualification, production or other-host acceptance is claimed.
+
+## Dashboard rate-limit recovery — 2026-11-09
+
+Continuous scheduler events reproduced 122 four-request snapshots (488 reads) in
+one minute, exceeding the existing 240-per-credential API window. Recovery also
+ignored Retry-After. The eight new regression cases failed first. Background
+snapshots now coalesce to five seconds; the API client shares a bounded monotonic
+429 cooldown across reads, event-stream reconnects and writes, with no automatic
+mutation replay. Both snapshot and stream recovery respect that cooldown. A default
+same-origin config file removes the optional config.json 404.
+
+Fresh dashboard tests passed 87/87, strict types, production Vite build and eight
+repository checks passed. Disposable Full/browser acceptance passed 31 scenarios
+(two optional fixtures skipped) plus the separate-origin scenario. A 125-second
+read-only browser soak against the actual 73-workload DEV scheduler made 67 API
+requests / 16 snapshots, with zero 429s, zero mutations and no browser token storage.
+The server's existing 60-second connection lifetime caused two one-second offline
+samples that recovered automatically. The scoped test credential was revoked.
+
+Focused independent review found no Critical/Important issue. Deferred Minor:
+when a background refresh is already pending, an action's follow-up snapshot can
+wait up to five seconds; operation acceptance/status tracking remains immediate
+and backend revision checks remain authoritative. This bounded delay is accepted
+for this repair rather than adding another timer-preemption path.
+
+Rust, Cargo, migrations, API rate limits and public DTOs are unchanged. The verified
+optimized daemon bytes are reused from 4649ed1, SHA-256
+`dcfa3fa5e2736ebc4d1c5b1fd902c520e57e34de3da1dcdbe804c1ea042743a6`;
+this is not a fresh Rust build/full Rust suite claim. The immutable deployment
+pairs those unchanged bytes with the newly built UI, preserves worker invocations
+and 73 definitions, and refreshes monitor provenance for the selected release.

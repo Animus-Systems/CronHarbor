@@ -704,3 +704,54 @@ describe("stream framing and recovery cursors", () => {
     expect(posts).toBe(0);
   });
 });
+
+describe("busy scheduler request budget", () => {
+  it("coalesces continuous events below one snapshot per five seconds", async () => {
+    vi.useFakeTimers();
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let snapshots = 0;
+    vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/events")) return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { stream = controller; init?.signal?.addEventListener("abort", () => controller.close(), { once: true }); },
+      }), { headers: { "Content-Type": "text/event-stream" } });
+      if (input.endsWith("/session")) { snapshots++; return json(principal); }
+      return input.endsWith("/status") ? json(status) : json({ items: [], next_cursor: null });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "private");
+    await vi.advanceTimersByTimeAsync(0);
+    for (let seq = 1; seq <= 120; seq++) {
+      const event: EventDto = { seq, event_kind: "attempt_succeeded", workload_id: workload.id, execution_id: execution.execution_id, payload_json: "{}", created_at_us: seq };
+      stream?.enqueue(new TextEncoder().encode(`id: ${seq}\nevent: change\ndata: ${JSON.stringify(event)}\n\n`));
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    expect(dashboard.connected.value).toBe(true);
+    expect(dashboard.events.value[0]?.seq).toBe(120);
+    expect(snapshots).toBeGreaterThanOrEqual(10);
+    expect(snapshots).toBeLessThanOrEqual(14);
+  });
+  it("waits through Retry-After without replaying a mutation or losing its verified snapshot", async () => {
+    vi.useFakeTimers();
+    let throttled = false;
+    let sessions = 0;
+    vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/events")) return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+      if (input.endsWith("/session")) { sessions++; return throttled ? new Response("", { status: 429, headers: { "Retry-After": "60" } }) : json(principal); }
+      return input.endsWith("/status") ? json(status) : json({ items: input.includes("/workloads?") ? [workload] : [], next_cursor: null });
+    });
+    await dashboard.connect("http://127.0.0.1/api/v1", "private");
+    const previous = dashboard.lastRefresh.value;
+    throttled = true;
+    await expect(dashboard.refresh()).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    const afterFailure = sessions;
+    await vi.advanceTimersByTimeAsync(59000);
+    expect(sessions).toBe(afterFailure);
+    expect(dashboard.lastRefresh.value).toBe(previous);
+    expect(dashboard.canAct.value).toBe(false);
+    throttled = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(dashboard.connected.value).toBe(true);
+    expect(dashboard.operations.value).toEqual([]);
+  });
+});

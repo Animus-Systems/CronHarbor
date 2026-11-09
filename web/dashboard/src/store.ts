@@ -113,7 +113,7 @@ async function refreshSnapshot(): Promise<void> {
       disconnect();
       connectionError.value = formatError(caught);
     } else if (!(caught instanceof ApiError && caught.status === 403))
-      scheduleRefresh();
+      scheduleRefresh(caught instanceof ApiError ? caught.retryAfterMs : undefined);
     throw caught;
   } finally {
     if (api.value === current) refreshing.value = false;
@@ -160,14 +160,14 @@ async function loadMore(kind: "workloads" | "executions"): Promise<void> {
     if (pageRequests[kind] === request) pageRequests[kind] = null;
   }
 }
-function scheduleRefresh(): void {
+function scheduleRefresh(delay?: number): void {
   if (refreshTimer) return;
   refreshTimer = setTimeout(
     () => {
       refreshTimer = undefined;
       void refresh().catch(() => {});
     },
-    connected.value ? 350 : retryDelay(recoveryAttempt++),
+    connected.value ? (delay ?? 5000) : Math.max(delay ?? 0, retryDelay(recoveryAttempt++)),
   );
 }
 async function streamLoop(
@@ -245,7 +245,9 @@ async function streamLoop(
           abort.signal.removeEventListener("abort", done);
           resolve();
         };
-        const timer = setTimeout(done, retryDelay(attempt++));
+        const timer = setTimeout(done, Math.max(
+          retryDelay(attempt++), caught instanceof ApiError ? (caught.retryAfterMs ?? 0) : 0,
+        ));
         abort.signal.addEventListener("abort", done, { once: true });
       });
     }
@@ -323,7 +325,7 @@ async function pollOperations(): Promise<void> {
         );
         if (generation !== sessionGeneration) return;
         rememberOperation(result);
-        if (operationFinished(result.state)) scheduleRefresh();
+        if (operationFinished(result.state)) scheduleRefresh(350);
       } catch (caught) {
         if (generation !== sessionGeneration) return;
         if (caught instanceof ApiError && caught.status === 401) {
@@ -355,7 +357,7 @@ async function submitIntent(intent: Intent): Promise<OperationDto | null> {
     rememberOperation(operation);
     uncertain.value = null;
     notice.value = `Operation ${operation.id} ${operation.state.toLowerCase()}. Acceptance does not mean completion.`;
-    scheduleRefresh();
+    scheduleRefresh(350);
     return operation;
   } catch (caught) {
     if (generation !== sessionGeneration) return null;

@@ -5,6 +5,7 @@ export class ApiError extends Error {
     readonly code: string,
     readonly status = 0,
     readonly requestId?: string,
+    readonly retryAfterMs?: number,
   ) {
     super(code);
     this.name = "ApiError";
@@ -90,10 +91,31 @@ function codeForStatus(status: number): string {
   return "SERVER_ERROR";
 }
 export class ApiClient {
+  private rateLimitUntil = 0;
+  private rateLimitRequestId: string | undefined;
   constructor(
     readonly base: string,
     private readonly token: string,
   ) {}
+  private checkCooldown(): void {
+    const remaining = Math.ceil(this.rateLimitUntil - performance.now());
+    if (remaining > 0)
+      throw new ApiError("RATE_LIMITED", 429, this.rateLimitRequestId, remaining);
+  }
+  private responseError(response: Response): ApiError {
+    const requestId = response.headers.get("x-request-id")
+      ?.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 100);
+    let retryAfterMs: number | undefined;
+    if (response.status === 429) {
+      const value = response.headers.get("retry-after") ?? "";
+      retryAfterMs = /^\d{1,6}$/.test(value)
+        ? Math.max(1000, Math.min(60000, Number(value) * 1000))
+        : 60000;
+      this.rateLimitUntil = Math.max(this.rateLimitUntil, performance.now() + retryAfterMs);
+      this.rateLimitRequestId = requestId;
+    }
+    return new ApiError(codeForStatus(response.status), response.status, requestId, retryAfterMs);
+  }
   async request<T>(
     path: string,
     guard: Guard<T>,
@@ -101,6 +123,7 @@ export class ApiClient {
     body?: unknown,
     key?: string,
   ): Promise<T> {
+    this.checkCooldown();
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.token}`,
       Accept: "application/json",
@@ -121,17 +144,9 @@ export class ApiClient {
     } catch {
       throw new ApiError("NETWORK");
     }
-    const requestId = response.headers
-      .get("x-request-id")
-      ?.replace(/[^a-zA-Z0-9_-]/g, "")
-      .slice(0, 100);
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      throw new ApiError(
-        codeForStatus(response.status),
-        response.status,
-        requestId,
-      );
+      throw this.responseError(response);
     }
     const length = Number(response.headers.get("content-length"));
     if (length > 2_097_152) {
@@ -179,6 +194,7 @@ export class ApiClient {
     return this.request(path, guard, "POST", body, key);
   }
   async stream(lastId: string, signal: AbortSignal): Promise<Response> {
+    this.checkCooldown();
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.token}`,
       Accept: "text/event-stream",
@@ -193,7 +209,7 @@ export class ApiClient {
     });
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      throw new ApiError(codeForStatus(response.status), response.status);
+      throw this.responseError(response);
     }
     if (!response.headers.get("content-type")?.includes("text/event-stream")) {
       await response.body?.cancel().catch(() => {});
