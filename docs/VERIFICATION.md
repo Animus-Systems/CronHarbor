@@ -410,7 +410,7 @@ and 73 definitions, and refreshes monitor provenance for the selected release.
 
 ## Application HTTP readiness — 2026-11-09
 
-Prepared product0.12.0 adds owner-allowlisted HTTP readiness to systemd Services.
+Product0.12.0 adds owner-allowlisted HTTP readiness to systemd Services.
 Existing manifests and public DTOs remain compatible; no migration changed.
 Literal loopback-only transport rejects proxies, redirects, credentials, expansion
 and overlong responses. Invocation checks and store fences reject obsolete samples.
@@ -450,8 +450,8 @@ uncertainty-persistence gaps. Their regressions failed first and now pass in the
 Minor: pre-promotion controller refusal can leave graph phase labelled refreshing
 while the scheduler correctly reports failure; no serving effect occurs.
 
-Actual application handover remains a separateDEV acceptance stage. This evidence
-does not claim production, another-host, VM reboot, signed-in business journeys,
+The six actual DEV application handovers completed on2026-11-09; see the live
+receipt below. This evidence does not claim production, another-host, VM reboot, signed-in business journeys,
 paid provider qualification, power-loss/OOM fault coverage or downgrade support for
 new HTTP definitions in older product binaries.
 
@@ -467,3 +467,29 @@ All336distinct all-feature/all-target Rust tests plus one nested proxy child pas
 with zero skips/failures, followed by strict Clippy, format and eight repository
 checks. No dependency, contract, migration, dashboard input or security quota changed.
 Optimized artifact and live post-patch browser acceptance are recorded separately.
+
+### Actual DEV application handover
+
+The six application units were adopted after verified HTTP readiness, preserving
+their existing invocations/container before old boot enablement was disabled.
+The controlled Admin deployment and same-artifact API planned stop/start passed.
+All original73 definitions/revisions/flags and evaluation/PDF invocations remained
+unchanged. A normal API report at13:15:41UTC confirmed79bindings,44jobs,25collectors,
+ten auxiliaries/eightREADY,zeroomissions/UNKNOWN. Reporting identity, generation1
+credentials and monotonic sequence were preserved through an audited scope amendment.
+
+The optimized0.12.1 Full binary built in2m09s, SHA-256
+`127e9f76d0f73b37a3f1008c67b46a7b2dde8d47ce2ef9a02cdda31d8debcd39`,
+from `aa55e12f1cb7e763208ad95f8c4d970e64e55e63`. It replaced0.12.0 at13:29:28UTC
+after natural native-job drain and a hash/schema5/integrity/foreign-key verified
+private staged backup. All79definitions and eight managed invocations were preserved;
+all eight recoveredREADY and scheduled admission resumed with zeroUNKNOWN.
+The actual post-patch operator browser stayed connected for120239ms across
+Overview/Services/Operations:24/24 samples,65HTTP200, zero API/page errors or writes,
+zero stream closures and empty local/session storage. A normal API receipt
+1613 at 2026-11-09T13:30:46.218Z reports0.12.1,44jobs,25collectors,tenauxiliaries,
+eightREADY and zeroomissions/UNKNOWN with the original credential identity.
+Final unit/probe/independent-supervisor checks passed; disk148GiB used/130GiBfree,
+9.9GiB available RAM, zero swap. Only verified unused build/package outputs were
+removed. These are actual DEV receipts; signed-in business/VM reboot/other-host/
+production acceptance remains unclaimed.
