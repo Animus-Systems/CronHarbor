@@ -5,7 +5,7 @@ services:
       target: full
     image: cronharbor:full-dev
     init: true
-    stop_grace_period: 360s
+    stop_grace_period: 960s
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

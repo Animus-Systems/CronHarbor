@@ -574,6 +574,7 @@
           "type": "integer",
           "format": "uint64",
           "default": 1,
+          "maximum": 900,
           "minimum": 0
         },
         "windowSeconds": {

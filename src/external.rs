@@ -1,4 +1,5 @@
 //! Explicitly enabled, allowlisted external lifecycle adapters.
+mod systemd;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,6 +12,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+pub use systemd::{ScopedSystemdUnit, SystemdScope};
+pub(crate) use systemd::{SystemdReference, reference as systemd_reference};
 
 #[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -39,9 +42,13 @@ pub struct ExecutorPolicy {
     pub max_pids: u32,
     pub systemd_enabled: bool,
     pub systemctl_binary: String,
+    pub systemd_reference_python: String,
     pub journalctl_binary: String,
     pub systemd_user: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_systemd_scope: Option<SystemdScope>,
     pub units: Vec<String>,
+    pub scoped_units: Vec<ScopedSystemdUnit>,
 }
 impl Default for ExecutorPolicy {
     fn default() -> Self {
@@ -55,9 +62,12 @@ impl Default for ExecutorPolicy {
             max_pids: 256,
             systemd_enabled: false,
             systemctl_binary: "/usr/bin/systemctl".into(),
+            systemd_reference_python: "/usr/bin/python3".into(),
             journalctl_binary: "/usr/bin/journalctl".into(),
             systemd_user: false,
+            legacy_systemd_scope: None,
             units: Vec::new(),
+            scoped_units: Vec::new(),
         }
     }
 }
@@ -75,6 +85,13 @@ pub enum ExternalHandle {
     Docker {
         id: String,
         labels: BTreeMap<String, String>,
+    },
+    SystemdV2 {
+        unit: String,
+        scope: SystemdScope,
+        since_us: Option<i64>,
+        service: bool,
+        invocation_id: Option<String>,
     },
     Systemd {
         unit: String,
@@ -147,12 +164,14 @@ pub fn load_policy(directory: &Path) -> Result<ExecutorPolicy> {
     for binary in [
         &policy.docker_binary,
         &policy.systemctl_binary,
+        &policy.systemd_reference_python,
         &policy.journalctl_binary,
     ] {
         if !Path::new(binary).is_absolute() || binary.contains('\0') {
             return Err(policy_error());
         }
     }
+    systemd::validate(&policy)?;
     Ok(policy)
 }
 
@@ -314,38 +333,47 @@ pub fn start_docker(
     Ok(handle)
 }
 
-fn valid_unit(policy: &ExecutorPolicy, unit: &str) -> bool {
-    policy.systemd_enabled
-        && policy.units.iter().any(|value| value == unit)
-        && unit.len() <= 255
-        && unit.ends_with(".service")
-        && unit
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && unit
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.@:-".contains(&b))
+fn systemctl_handle(
+    policy: &ExecutorPolicy,
+    handle: &ExternalHandle,
+    args: &[String],
+    timeout: Duration,
+) -> Result<CommandOutput> {
+    let scope = systemd::authorize(policy, handle)?;
+    if matches!(handle, ExternalHandle::Systemd { .. }) {
+        return systemctl(policy, args, timeout);
+    }
+    let mut full = vec![
+        match scope {
+            SystemdScope::User => "--user",
+            SystemdScope::System => "--system",
+        }
+        .into(),
+    ];
+    full.extend_from_slice(args);
+    run_with_user_bus(
+        &policy.systemctl_binary,
+        &full,
+        timeout,
+        scope == SystemdScope::User,
+    )
 }
 
+pub fn systemd_intent(
+    policy: &ExecutorPolicy,
+    spec: &SystemdSpec,
+    service: bool,
+) -> Result<ExternalHandle> {
+    systemd::intent(policy, spec, service)
+}
+pub fn start_systemd_intent(
+    policy: &ExecutorPolicy,
+    handle: &ExternalHandle,
+) -> Result<ExternalHandle> {
+    systemd::start(policy, handle)
+}
 pub fn start_systemd(policy: &ExecutorPolicy, spec: &SystemdSpec) -> Result<ExternalHandle> {
-    if !valid_unit(policy, &spec.unit) {
-        return Err(policy_error());
-    }
-    let since_us = crate::now_us();
-    if !systemctl(
-        policy,
-        &["start".into(), spec.unit.clone()],
-        Duration::from_secs(15),
-    )?
-    .success
-    {
-        return Err(unavailable());
-    }
-    Ok(ExternalHandle::Systemd {
-        unit: spec.unit.clone(),
-        since_us: Some(since_us),
-    })
+    start_systemd_intent(policy, &systemd_intent(policy, spec, false)?)
 }
 
 pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Observation> {
@@ -446,16 +474,15 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                 healthy,
             })
         }
-        ExternalHandle::Systemd { unit, .. } => {
-            if !valid_unit(policy, unit) {
-                return Err(policy_error());
-            }
-            let output = systemctl(
+        ExternalHandle::Systemd { unit, .. } | ExternalHandle::SystemdV2 { unit, .. } => {
+            systemd::authorize(policy, handle)?;
+            let output = systemctl_handle(
                 policy,
+                handle,
                 &[
                     "show".into(),
                     "--no-pager".into(),
-                    "--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus"
+                    "--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,InvocationID"
                         .into(),
                     unit.clone(),
                 ],
@@ -488,6 +515,7 @@ pub fn inspect(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Result<Obser
                     healthy: None,
                 });
             }
+            systemd::verify_invocation(handle, &properties)?;
             let active = properties.get("ActiveState").copied().unwrap_or_default();
             Ok(Observation {
                 state: if matches!(active, "active" | "activating" | "reloading") {
@@ -538,10 +566,10 @@ pub(crate) fn stop_if_current(
     grace_seconds: u64,
     current: impl Fn() -> bool,
 ) -> Result<bool> {
-    if grace_seconds > 300 {
+    if grace_seconds > crate::config::MAX_STOP_GRACE_SECONDS {
         return Err(Error::new(
             "CONFIG_INVALID",
-            "Stop grace exceeds 300 seconds",
+            "Stop grace exceeds 900 seconds",
         ));
     }
     let observation = inspect(policy, handle)?;
@@ -570,12 +598,17 @@ pub(crate) fn stop_if_current(
                 Duration::from_secs(grace_seconds + 5),
             )?;
         }
-        ExternalHandle::Systemd { unit, .. } => {
-            let _ = systemctl(
+        ExternalHandle::Systemd { unit, .. } | ExternalHandle::SystemdV2 { unit, .. } => {
+            let stopped = systemctl_handle(
                 policy,
+                handle,
                 &["stop".into(), unit.clone()],
                 Duration::from_secs(grace_seconds + 5),
             )?;
+            if matches!(handle, ExternalHandle::SystemdV2 { service: true, .. }) {
+                // A blocking StopUnit success is proof even if inactive metadata was collected.
+                return Ok(stopped.success && !stopped.truncated && current());
+            }
         }
     }
     Ok(matches!(
@@ -612,10 +645,9 @@ pub(crate) fn logs_if_current(
         ExternalHandle::Docker { id, .. } => {
             docker(policy, &["logs".into(), id.clone()], Duration::from_secs(5))?
         }
-        ExternalHandle::Systemd { unit, since_us } => {
-            if !valid_unit(policy, unit) {
-                return Err(policy_error());
-            }
+        ExternalHandle::Systemd { unit, since_us }
+        | ExternalHandle::SystemdV2 { unit, since_us, .. } => {
+            systemd::authorize(policy, handle)?;
             let boundary = since_us
                 .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_micros)
                 .filter(|_| since_us.is_some_and(|value| value >= 0))
@@ -629,10 +661,19 @@ pub(crate) fn logs_if_current(
                 "--unit".into(),
                 unit.clone(),
             ];
-            if policy.systemd_user {
-                args.insert(0, "--user".into());
+            match systemd::authorize(policy, handle)? {
+                SystemdScope::User => args.insert(0, "--user".into()),
+                SystemdScope::System if matches!(handle, ExternalHandle::SystemdV2 { .. }) => {
+                    args.insert(0, "--system".into())
+                }
+                SystemdScope::System => {}
             }
-            run(&policy.journalctl_binary, &args, Duration::from_secs(5))?
+            run_with_user_bus(
+                &policy.journalctl_binary,
+                &args,
+                Duration::from_secs(5),
+                systemd::authorize(policy, handle)? == SystemdScope::User,
+            )?
         }
     };
     if !output.success {
@@ -673,7 +714,7 @@ pub fn remove_finished(policy: &ExecutorPolicy, handle: &ExternalHandle) -> Resu
                 "Only a verified terminal owned container may be removed",
             )),
         },
-        ExternalHandle::Systemd { .. } => Ok(()),
+        ExternalHandle::Systemd { .. } | ExternalHandle::SystemdV2 { .. } => Ok(()),
     }
 }
 
@@ -777,7 +818,12 @@ fn systemctl(policy: &ExecutorPolicy, args: &[String], timeout: Duration) -> Res
         full.push("--user".into());
     }
     full.extend_from_slice(args);
-    run(&policy.systemctl_binary, &full, timeout)
+    run_with_user_bus(
+        &policy.systemctl_binary,
+        &full,
+        timeout,
+        policy.systemd_user,
+    )
 }
 struct CommandOutput {
     stdout: Vec<u8>,
@@ -807,6 +853,14 @@ fn collect(mut reader: impl Read) -> (Vec<u8>, bool) {
     (result, truncated)
 }
 fn run(binary: &str, args: &[String], timeout: Duration) -> Result<CommandOutput> {
+    run_with_user_bus(binary, args, timeout, false)
+}
+fn run_with_user_bus(
+    binary: &str,
+    args: &[String],
+    timeout: Duration,
+    user_bus: bool,
+) -> Result<CommandOutput> {
     use nix::{
         sys::signal::{Signal, killpg},
         unistd::Pid,
@@ -829,6 +883,13 @@ fn run(binary: &str, args: &[String], timeout: Duration) -> Result<CommandOutput
         .process_group(0);
     if let Some(home) = std::env::var_os("HOME") {
         command.env("HOME", home);
+    }
+    if user_bus {
+        let directory = format!("/run/user/{}", nix::unistd::geteuid().as_raw());
+        command.env("XDG_RUNTIME_DIR", &directory).env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={directory}/bus"),
+        );
     }
     let mut child = command.spawn().map_err(|_| unavailable())?;
     let group = match i32::try_from(child.id()) {

@@ -112,7 +112,7 @@ A clean daemon shutdown records native cancellation as `DAEMON_SHUTDOWN`. Servic
 
 START received while an earlier STOP is terminating a process waits for that termination and requests a replacement, including with automatic restart disabled. Applying a new revision to a failed service permits a fresh launch; it preserves existing STOPPED intent and UNKNOWN evidence.
 
-`service.stopGraceSeconds` accepts 0–300 seconds. Docker receives the full grace period; the systemd helper waits for that period plus bounded overhead while the existing unit's own stop policy remains authoritative. The supplied systemd and Compose packaging allows 360 seconds for shutdown to finish an in-flight stop and bounded executor observation. Custom supervisors need the same allowance. Healthy external workloads remain available for reattachment after daemon restart.
+`service.stopGraceSeconds` accepts 0–900 seconds. Docker receives the full grace period; the systemd helper waits for that period plus bounded overhead while the existing unit's own stop policy remains authoritative. The supplied systemd and Compose packaging allows 960 seconds for shutdown to finish an in-flight stop and bounded executor observation. Custom supervisors need the same allowance. Healthy external workloads remain available for reattachment after daemon restart.
 
 Operation lookup permits the originating actor to inspect its own operations. Inspecting another actor's operation requires `operations.manage` and the target namespace. Batch operations have no single target namespace and require wildcard namespace scope for another actor to inspect them.
 
@@ -133,6 +133,39 @@ Unresolved UNKNOWN logs remain protected from retention and still consume the co
 Copy the policy shape from `examples/optional/executors.json` to `STATE_DIR/executors.json`, owned by the daemon user with mode 0600. Enable only the adapter and exact targets required.
 
 Docker execution requires an explicit local Unix daemon connection and digest-pinned image allowlist. Admission fixes non-root container UID, network allowlist, read-only filesystem, dropped capabilities, no-new-privileges, memory/PID/CPU limits and bounded Docker logs. Workload manifests cannot request host mounts, privileged mode or host networking. Immutable labels bind instance/workload/revision/execution/launch identity; reconnect never adopts an object with mismatched labels. Owned terminal containers are removed only after durable outcome and successful log capture. A Docker daemon outage yields uncertainty, not success or blind replay. Access to a privileged Docker daemon remains high authority, even when CronHarbor itself is non-root.
+
+Mixed user and system managers use private `executors.json` entries such as
+`"scopedUnits": [{"unit":"worker.service","scope":"user"}, {"unit":"pdf.service","scope":"system"}]`
+with `systemdEnabled: true`. Legacy `units` and `systemdUser` remain supported;
+duplicate names across either list are refused. New `systemd_v2` handles pin the
+manager and actual invocation receipt. Legacy handles cannot adopt a scoped
+mapping. Existing unscoped handles additionally require an owner-verified
+`legacySystemdScope` (`user` or `system`) matching the legacy global manager.
+An absent baseline or changed global manager blocks those old handles; new
+starts still use the pinned v2 format. Drain or reconcile old work before
+changing either historical setting. Scope changes retain uncertainty instead of redirecting control.
+
+Scheduled systemd jobs require `/usr/bin/python3` with the installed `dbus` module
+(owner-private `systemdReferencePython` can select another absolute interpreter).
+A bounded helper holds a D-Bus unit reference before start, so systemd cannot
+collect a fast oneshot's invocation/result before durable settlement. The reference
+stays held during UNKNOWN and is released on terminal settlement or reconciliation.
+This needs RefUnit authorization for that scheduled unit; persistent Services do
+not use RefUnit. Missing prerequisites reject before start. After a daemon crash,
+missing invocation metadata remains UNKNOWN and requires evidence-based resolution.
+A Service stop uses the successful blocking StopUnit receipt; unavailable post-stop
+logs are marked truncated instead of changing verified termination into success logs.
+
+Starts enqueue without waiting for a oneshot to finish, then require a new verified
+InvocationID before claiming a receipt. An old success or another invocation cannot
+complete a scheduled run. Lost receipts stay UNKNOWN. A managed Service can adopt
+an already healthy allowlisted unit without restarting it and owns that logical
+unit across its existing OS restart policy; disable Cron Harbor automatic restart
+when that policy owns retries. Scheduled jobs cannot coalesce onto busy units, and
+unit reservations are exclusive across workload definitions, including UNKNOWN.
+Old binaries cannot interpret new scoped handles: drain/reconcile and verify a
+compatible rollback state before downgrading. Do not test a downgrade against live
+state or restore an old business database over current work.
 
 The systemd bridge controls only exact allowlisted existing `.service` units. Existing units retain their execution environment, credentials, AppArmor, filesystem and cgroup protections. Unit manifests reject native command/env/limit settings instead of silently ignoring them. Journal capture uses the persisted start-intent time as its lower boundary; legacy handles without that evidence return unavailable logs. This bridge needs existing OS authorization; CronHarbor does not install broad polkit/D-Bus permissions or recreate units as raw processes. The time filter follows the official [journalctl](https://www.freedesktop.org/software/systemd/man/256/journalctl.html) and [systemd timestamp](https://github.com/systemd/systemd/blob/main/man/systemd.time.xml) contracts; a live hardened-unit drill is still required for each deployment.
 

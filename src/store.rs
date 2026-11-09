@@ -772,13 +772,64 @@ impl Store {
         Ok(())
     }
     pub fn persist_external_intent(
-        &self,
+        &mut self,
         attempt: &str,
         handle: &crate::external::ExternalHandle,
     ) -> Result<()> {
         let value = serde_json::to_string(handle)
             .map_err(|_| Error::new("INTERNAL_ERROR", "Cannot encode executor identity"))?;
-        self.connection.execute("UPDATE attempts SET external_handle_json=?1 WHERE id=?2 AND state='LAUNCH_INTENT_RECORDED'",params![value,attempt])?;
+        let tx = self.connection.transaction()?;
+        if let crate::external::ExternalHandle::Systemd { unit, .. }
+        | crate::external::ExternalHandle::SystemdV2 { unit, .. } = handle
+        {
+            let mut statement=tx.prepare("SELECT state,external_handle_json FROM attempts WHERE executor_kind='systemd' AND id<>?1 AND state IN('LAUNCH_INTENT_RECORDED','START_REQUESTED','RUNNING','UNKNOWN') LIMIT 257")?;
+            let rows = statement
+                .query_map([attempt], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // Executor policy permits at most 256 unique unit targets.
+            if rows.len() > 256 {
+                return Err(Error::new(
+                    "START_REJECTED",
+                    "Unit ownership cannot be verified",
+                ));
+            }
+            for (state, encoded) in rows {
+                let Some(encoded) = encoded else {
+                    if state == "LAUNCH_INTENT_RECORDED" {
+                        continue;
+                    }
+                    return Err(Error::new(
+                        "START_REJECTED",
+                        "Unit ownership has incomplete evidence",
+                    ));
+                };
+                let existing = serde_json::from_str::<crate::external::ExternalHandle>(&encoded)
+                    .map_err(|_| {
+                        Error::new("START_REJECTED", "Unit ownership has invalid evidence")
+                    })?;
+                match existing {
+                    crate::external::ExternalHandle::Systemd { unit: owned, .. }
+                    | crate::external::ExternalHandle::SystemdV2 { unit: owned, .. }
+                        if owned != *unit => {}
+                    _ => {
+                        return Err(Error::new(
+                            "START_REJECTED",
+                            "The unit already has an owning execution",
+                        ));
+                    }
+                }
+            }
+        }
+        let changed=tx.execute("UPDATE attempts SET external_handle_json=?1 WHERE id=?2 AND state='LAUNCH_INTENT_RECORDED'",params![value,attempt])?;
+        if changed != 1 {
+            return Err(Error::new(
+                "STATE_CONFLICT",
+                "Attempt cannot reserve executor identity",
+            ));
+        }
+        tx.commit()?;
         Ok(())
     }
     pub fn external_identity(&self, launch: &Launch) -> Result<crate::external::Identity> {

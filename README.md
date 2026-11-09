@@ -174,7 +174,7 @@ Follow [AGENTS.md](AGENTS.md) for type safety, trust boundaries, migration rules
 
 Native jobs run as the daemon user and must be trusted. Process groups provide lifecycle cleanup, not an adversarial sandbox. Docker execution requires explicit policy and privileged daemon access; systemd units retain their existing OS protections. Remote HTTP deployments require a TLS reverse proxy and restricted backend access.
 
-The software is at version 0.11.0. Production migration, live systemd hardening, performance targets, and multi-architecture release certification still need deployment-specific evidence. Local test results are documented rather than presented as production guarantees.
+The software is at version 0.11.1. Production migration, live systemd hardening, performance targets, and multi-architecture release certification still need deployment-specific evidence. Local test results are documented rather than presented as production guarantees.
 
 ## License
 

@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path, str::FromStr};
 pub const MAX_CONFIG_BYTES: usize = 65_536;
 pub const GRACE_US: i64 = 60_000_000;
+pub const MAX_STOP_GRACE_SECONDS: u64 = 900;
+
 #[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Manifest {
@@ -255,6 +257,7 @@ pub struct Service {
     pub backoff_seconds: u64,
     pub max_backoff_seconds: u64,
     pub reset_after_seconds: u64,
+    #[schemars(range(max = 900))]
     pub stop_grace_seconds: u64,
     pub startup_grace_seconds: u64,
     pub readiness: Option<Probe>,
@@ -652,7 +655,7 @@ impl Manifest {
             || svc.backoff_seconds == 0
             || svc.max_backoff_seconds < svc.backoff_seconds
             || svc.max_backoff_seconds > 86400
-            || svc.stop_grace_seconds > 300
+            || svc.stop_grace_seconds > MAX_STOP_GRACE_SECONDS
             || svc.startup_grace_seconds > 3600
         {
             return Err(invalid("Invalid service supervision policy"));

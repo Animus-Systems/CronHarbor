@@ -279,6 +279,7 @@ esac
             systemd_enabled: true,
             systemctl_binary: helper.to_string_lossy().into_owned(),
             journalctl_binary: helper.to_string_lossy().into_owned(),
+            legacy_systemd_scope: Some(cronharbor::external::SystemdScope::System),
             units: vec!["worker.service".into()],
             ..ExecutorPolicy::default()
         };

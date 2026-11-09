@@ -8,7 +8,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -358,19 +358,27 @@ pub fn run_with_settings(
         while index < pending.len() {
             if pending[index].task.is_finished() {
                 let item = pending.swap_remove(index);
-                match item.task.join() {
-                    Ok(Ok(handle)) => {
+                let (result, reference) = match item.task.join() {
+                    Ok(value) => value,
+                    Err(_) => (
+                        Err(Error::new(
+                            "EXECUTOR_UNAVAILABLE",
+                            "External start receipt is unavailable",
+                        )),
+                        None,
+                    ),
+                };
+                match result {
+                    Ok(handle) => {
                         let encoded =
                             serde_json::to_string(&handle).map_err(|_| transport_error())?;
                         store.running_handle(&item.launch, &encoded, now)?;
-                        external.push(ExternalWatch::new(
-                            item.launch,
-                            handle,
-                            item.secrets,
-                            item.deadline,
-                        ));
+                        let mut watch =
+                            ExternalWatch::new(item.launch, handle, item.secrets, item.deadline);
+                        watch.reference = Arc::new(Mutex::new(reference));
+                        external.push(watch);
                     }
-                    Ok(Err(error)) => {
+                    Err(error) => {
                         let outcome = if matches!(
                             error.code.as_str(),
                             "START_REJECTED" | "CONFIG_INVALID" | "NOT_AUTHORIZED"
@@ -382,10 +390,16 @@ pub fn run_with_settings(
                         store.finish(&item.launch, &outcome, now)?;
                         if outcome.state != EndState::Unknown {
                             external_deadlines.remove(&item.launch.attempt_id);
+                        } else if reference.is_some() {
+                            let mut watch = ExternalWatch::new(
+                                item.launch,
+                                item.handle,
+                                item.secrets,
+                                item.deadline,
+                            );
+                            watch.reference = Arc::new(Mutex::new(reference));
+                            external.push(watch);
                         }
-                    }
-                    Err(_) => {
-                        store.finish(&item.launch, &unknown_outcome("EXECUTOR_UNAVAILABLE"), now)?
                     }
                 }
             } else {
@@ -473,7 +487,19 @@ pub fn run_with_settings(
                     if outcome.state != EndState::Unknown {
                         external_deadlines.remove(&external[index].launch.attempt_id);
                     }
-                    external.swap_remove(index);
+                    if outcome.state == EndState::Unknown
+                        && !stopping
+                        && external[index]
+                            .reference
+                            .lock()
+                            .is_ok_and(|held| held.is_some())
+                    {
+                        // Preserve oneshot metadata while its ownership remains uncertain.
+                        external[index].next = Instant::now() + Duration::from_secs(10);
+                        index += 1;
+                    } else {
+                        external.swap_remove(index);
+                    }
                 }
                 None => index += 1,
             }
@@ -521,8 +547,11 @@ pub fn run_with_settings(
                 {
                     continue;
                 }
-                let secrets = if matches!(handle, crate::external::ExternalHandle::Systemd { .. })
-                    && launch.manifest.spec.execution.secret_refs.is_empty()
+                let secrets = if matches!(
+                    handle,
+                    crate::external::ExternalHandle::Systemd { .. }
+                        | crate::external::ExternalHandle::SystemdV2 { .. }
+                ) && launch.manifest.spec.execution.secret_refs.is_empty()
                 {
                     Some(Vec::new())
                 } else {
@@ -633,7 +662,11 @@ fn unknown_outcome(code: &'static str) -> Outcome {
 }
 struct PendingStart {
     launch: Launch,
-    task: thread::JoinHandle<Result<crate::external::ExternalHandle>>,
+    task: thread::JoinHandle<(
+        Result<crate::external::ExternalHandle>,
+        Option<crate::external::SystemdReference>,
+    )>,
+    handle: crate::external::ExternalHandle,
     secrets: Option<Vec<Vec<u8>>>,
     deadline: Option<Instant>,
 }
@@ -685,17 +718,28 @@ fn dispatch(
     let handle = if execution.adapter == "docker" {
         crate::external::docker_handle(&identity)
     } else {
-        crate::external::ExternalHandle::Systemd {
-            since_us: Some(crate::now_us()),
-            unit: execution
-                .systemd
-                .as_ref()
-                .ok_or_else(|| Error::new("CONFIG_INVALID", "Missing systemd specification"))?
-                .unit
-                .clone(),
+        let spec = execution
+            .systemd
+            .as_ref()
+            .ok_or_else(|| Error::new("CONFIG_INVALID", "Missing systemd specification"))?;
+        let prepared = crate::external::load_policy(&store.directory).and_then(|policy| {
+            crate::external::systemd_intent(&policy, spec, launch.manifest.kind == "Service")
+        });
+        match prepared {
+            Ok(handle) => handle,
+            Err(_) => {
+                store.finish(&launch, &Outcome::rejected(), crate::now_us())?;
+                return Ok(());
+            }
         }
     };
-    store.persist_external_intent(&launch.attempt_id, &handle)?;
+    if let Err(error) = store.persist_external_intent(&launch.attempt_id, &handle) {
+        if error.code == "START_REJECTED" {
+            store.finish(&launch, &Outcome::rejected(), crate::now_us())?;
+            return Ok(());
+        }
+        return Err(error);
+    }
     let deadline = external_deadline(&launch.manifest, Instant::now(), Duration::ZERO);
     store.start_requested(&launch.attempt_id, crate::now_us())?;
     external_deadlines.insert(launch.attempt_id.clone(), deadline);
@@ -709,32 +753,39 @@ fn dispatch(
     };
     let secrets = Some(crate::process::secret_values(&execution, &env));
     let directory = store.directory.clone();
+    let prepared_handle = handle.clone();
     let task = thread::spawn(move || {
-        let policy = crate::external::load_policy(&directory)?;
-        if let Some(docker) = execution.docker {
-            crate::external::start_docker(
-                &policy,
-                &docker,
-                &identity,
-                crate::external::DockerContext {
-                    command: &execution.command,
-                    args: &execution.args,
-                    env: &env,
-                    working_directory: &execution.working_directory,
-                },
-                &directory,
-            )
-        } else if let Some(systemd) = execution.systemd {
-            crate::external::start_systemd(&policy, &systemd)
-        } else {
-            Err(Error::new(
-                "CONFIG_INVALID",
-                "Missing external executor specification",
-            ))
-        }
+        let mut reference = None;
+        let result = (|| {
+            let policy = crate::external::load_policy(&directory)?;
+            if let Some(docker) = execution.docker {
+                crate::external::start_docker(
+                    &policy,
+                    &docker,
+                    &identity,
+                    crate::external::DockerContext {
+                        command: &execution.command,
+                        args: &execution.args,
+                        env: &env,
+                        working_directory: &execution.working_directory,
+                    },
+                    &directory,
+                )
+            } else if execution.systemd.is_some() {
+                reference = crate::external::systemd_reference(&policy, &prepared_handle)?;
+                crate::external::start_systemd_intent(&policy, &prepared_handle)
+            } else {
+                Err(Error::new(
+                    "CONFIG_INVALID",
+                    "Missing external executor specification",
+                ))
+            }
+        })();
+        (result, reference)
     });
     pending.push(PendingStart {
         launch,
+        handle,
         task,
         secrets,
         deadline,
@@ -747,6 +798,7 @@ enum ExternalResult {
     Finished(Outcome, Option<Vec<u8>>),
 }
 struct ExternalWatch {
+    reference: Arc<Mutex<Option<crate::external::SystemdReference>>>,
     retired: Arc<AtomicBool>,
     launch: Launch,
     handle: crate::external::ExternalHandle,
@@ -781,6 +833,7 @@ impl ExternalWatch {
         deadline: Option<Instant>,
     ) -> Self {
         Self {
+            reference: Arc::new(Mutex::new(None)),
             retired: Arc::new(AtomicBool::new(false)),
             launch,
             handle,
@@ -813,6 +866,7 @@ impl ExternalWatch {
             return None;
         }
         let stopping = self.stopping;
+        let reference = Arc::clone(&self.reference);
         let retired = Arc::clone(&self.retired);
         let handle = self.handle.clone();
         let directory = directory.to_owned();
@@ -843,10 +897,36 @@ impl ExternalWatch {
             if retired.load(Ordering::Relaxed) {
                 return ExternalResult::Retired;
             }
+            let held = reference.lock().map(|mut held| -> Result<()> {
+                if held.is_none() {
+                    *held = crate::external::systemd_reference(&policy, &handle)?;
+                }
+                Ok(())
+            });
+            if !matches!(held, Ok(Ok(()))) {
+                return ExternalResult::Finished(unknown_outcome("EXECUTOR_UNAVAILABLE"), None);
+            }
             if stopping {
                 match crate::external::stop_if_current(&policy, &handle, grace, || {
                     !retired.load(Ordering::Relaxed)
                 }) {
+                    Ok(true)
+                        if matches!(
+                            handle,
+                            crate::external::ExternalHandle::SystemdV2 { service: true, .. }
+                        ) =>
+                    {
+                        return ExternalResult::Finished(
+                            Outcome {
+                                state: stop_state,
+                                error_code: Some("CANCELLED_BY_OPERATOR"),
+                                exit_code: None,
+                                log_bytes: 0,
+                                log_truncated: true,
+                            },
+                            None,
+                        );
+                    }
                     Ok(true) => {}
                     _ => {
                         return ExternalResult::Finished(
@@ -1025,6 +1105,8 @@ mod tests {
     fn external_test_policy(directory: &Path) -> PathBuf {
         let helper = directory.join("systemctl");
         fs::write(&helper, r##"#!/bin/sh
+case "$1" in --user|--system) shift;; esac
+if [ "$1" = --no-block ]; then shift; fi
 case "$1" in
 start)
   : > "$0.starting"
@@ -1038,9 +1120,10 @@ show)
     while [ ! -f "$0.release" ] && [ "$count" -lt 200 ]; do sleep 0.01; count=$((count + 1)); done
     rm "$0.block-show"
   fi
-  active=active
+  active=active; id=11111111111111111111111111111111
+  if [ -f "$0.fresh-start" ] && [ ! -f "$0.starting" ]; then active=inactive; id=; fi
   if [ -f "$0.stopped" ]; then active=inactive; fi
-  printf 'LoadState=loaded\nActiveState=%s\nResult=success\nExecMainCode=1\nExecMainStatus=0\n' "$active"
+  printf 'LoadState=loaded\nActiveState=%s\nResult=success\nExecMainCode=1\nExecMainStatus=0\nInvocationID=%s\nJob=\n' "$active" "$id"
   ;;
 stop) : > "$0.stopped" ;;
 --no-pager) printf 'safe evidence\n' ;;
@@ -1048,10 +1131,15 @@ stop) : > "$0.stopped" ;;
 esac
 "##).unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        let reference = directory.join("reference-python");
+        fs::write(&reference, "#!/bin/sh\nprintf 'READY\\n'\ncat >/dev/null\n").unwrap();
+        fs::set_permissions(&reference, fs::Permissions::from_mode(0o700)).unwrap();
         let policy = crate::external::ExecutorPolicy {
+            systemd_reference_python: reference.to_string_lossy().into_owned(),
             systemd_enabled: true,
             systemctl_binary: helper.to_string_lossy().into_owned(),
             journalctl_binary: helper.to_string_lossy().into_owned(),
+            legacy_systemd_scope: Some(crate::external::SystemdScope::System),
             units: vec!["worker.service".into()],
             ..crate::external::ExecutorPolicy::default()
         };
@@ -1078,6 +1166,7 @@ esac
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let mut store = Store::open(directory.path()).unwrap();
         let helper = external_test_policy(directory.path());
+        fs::write(helper.with_extension("fresh-start"), "").unwrap();
         let mut manifest = external_test_launch().manifest;
         manifest.spec.execution.adapter = "systemd".into();
         manifest.spec.execution.command.clear();
@@ -1120,7 +1209,9 @@ esac
         wait_for_external_test(|| helper.with_extension("starting").exists());
         assert!(!item.task.is_finished());
         fs::write(helper.with_extension("release"), "").unwrap();
-        let handle = item.task.join().unwrap().unwrap();
+        let (handle, reference) = item.task.join().unwrap();
+        let handle = handle.unwrap();
+        drop(reference);
         let mut watch = ExternalWatch::new(item.launch, handle, item.secrets, item.deadline);
         watch.next = before + Duration::from_secs(20);
         assert!(

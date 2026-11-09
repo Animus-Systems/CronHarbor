@@ -210,13 +210,16 @@ fn systemd_bridge_only_controls_existing_allowlisted_units() {
         r##"#!/bin/sh
 printf '%s\n' "$@" >> "$0.calls"
 if [ "$1" = '--user' ]; then shift; fi
+if [ "$1" = '--no-block' ]; then shift; fi
 case "$1" in
-start) printf active > "$0.state" ;;
+start) printf active > "$0.state"; : > "$0.started" ;;
 stop) printf inactive > "$0.state" ;;
 show)
   state=inactive
   if [ -f "$0.state" ]; then state=$(cat "$0.state"); fi
-  printf 'LoadState=loaded\nActiveState=%s\nSubState=running\nExecMainStatus=0\n' "$state"
+  id=
+  if [ -f "$0.started" ]; then id=11111111111111111111111111111111; fi
+  printf 'LoadState=loaded\nActiveState=%s\nSubState=running\nResult=success\nExecMainCode=1\nExecMainStatus=0\nInvocationID=%s\nJob=\n' "$state" "$id"
   ;;
 *) exit 90 ;;
 esac
@@ -228,6 +231,7 @@ esac
         systemd_enabled: true,
         systemctl_binary: systemctl.to_str().unwrap().into(),
         systemd_user: true,
+        legacy_systemd_scope: Some(cronharbor::external::SystemdScope::User),
         units: vec!["reviewed-worker.service".into()],
         ..ExecutorPolicy::default()
     };
@@ -248,7 +252,7 @@ esac
         },
     )
     .unwrap();
-    assert!(matches!(handle, ExternalHandle::Systemd { .. }));
+    assert!(matches!(handle, ExternalHandle::SystemdV2 { .. }));
     assert_eq!(
         external::inspect(&policy, &handle).unwrap().state,
         ExternalState::Running
@@ -259,7 +263,9 @@ esac
         ExternalState::Exited
     );
     let calls = fs::read_to_string(systemctl.with_extension("calls")).unwrap();
-    assert!(calls.contains("--user\nstart\nreviewed-worker.service\n"));
+    assert!(
+        calls.contains("--user\n--no-block\nstart\n--job-mode=fail\nreviewed-worker.service\n")
+    );
     assert!(calls.contains("--user\nstop\nreviewed-worker.service\n"));
     assert!(!calls.contains("set-property"));
     assert!(!calls.contains("daemon-reload"));
@@ -564,6 +570,7 @@ esac
     let policy = ExecutorPolicy {
         systemd_enabled: true,
         systemctl_binary: binary.to_str().unwrap().into(),
+        legacy_systemd_scope: Some(cronharbor::external::SystemdScope::System),
         units: vec!["worker.service".into()],
         ..ExecutorPolicy::default()
     };
@@ -749,6 +756,7 @@ fn systemd_terminal_observations_require_complete_valid_result_evidence() {
     let policy = ExecutorPolicy {
         systemd_enabled: true,
         systemctl_binary: binary.to_string_lossy().into_owned(),
+        legacy_systemd_scope: Some(cronharbor::external::SystemdScope::System),
         units: vec!["worker.service".into()],
         ..ExecutorPolicy::default()
     };

@@ -335,3 +335,24 @@ The later twelve-finding fix pass reran the application runtime suites, browser 
 ## External acceptance gates
 
 Unexecuted gates include the real Banana Ventura migration/cutover, host systemd security drill, the complete disk-full/OOM/power-loss fault matrix, performance profiles P0–P5, x86_64 execution, independent security review, Rust advisory/license policy automation, SBOM, signing/provenance and name/legal clearance. No production migration, public release or published image is claimed by these local checks.
+
+## Scoped systemd controller — 2026-11-09 (prepared source)
+
+The v0.11.1 candidate passed scoped-manager and historical-baseline authorization,
+actual invocation identity, physical-unit ownership, 900/901-second validation,
+reference lifetime, preflight rejection and recovery checks. The all-target Rust
+run exposed a shutdown regression in uncertain legacy controls; that target was
+interrupted, fixed, and passed with the library and all affected external targets.
+Other all-target results were retained. Strict Clippy, format, generated exports,
+workload schema and eight repository checks passed. Dashboard types, 79 unit tests
+and build passed. Full browser/API/MCP/backup acceptance passed 31 scenarios plus
+its separate-origin scenario; the optional owner-restart browser fixture was
+skipped in this command. The first browser attempt lacked the installed Chromium
+mount; the passing run reused the VM's existing read-only browser installation.
+
+A real user-systemd fixture passed instantaneous and 16-second oneshots, adoption
+without changing PID/invocation, owner restart reattachment and verified Service
+stop, with zero UNKNOWN. It used disposable units and private state only. Existing
+Python dbus references retain completed oneshot evidence; permanent Services need
+no extra RefUnit authority. Compose validation passed. Optimized release, packaged
+container acceptance, integrated review and live four-unit handover remain pending.
