@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Finite real user-systemd drill; selected binary, private state and owned units only."""
-import argparse,hashlib,json,os,signal,subprocess,tempfile,time,uuid
+import argparse,hashlib,importlib.util,json,os,signal,socket,subprocess,tempfile,time,uuid
 from pathlib import Path
 
 def main():
- parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,required=True);parser.add_argument('--old-binary',type=Path);args=parser.parse_args()
+ parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,required=True);parser.add_argument('--old-binary',type=Path);parser.add_argument('--managed-control',type=Path);args=parser.parse_args()
  binary=args.binary.resolve(strict=True);assert os.getuid()!=0,'Use the user manager, not root'
  tag='cronharbor-proof-'+uuid.uuid4().hex[:12]
  units=Path.home()/'.config/systemd/user';created=[];daemon=None;log=None
@@ -90,7 +90,46 @@ def main():
     assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='2'
     stop();policy_path.write_text(json.dumps(policy));boot();assert cli('status')['unknown']==0 and cli('status')['active']==0
     assert (root/'job.effects').read_text()=='2' and (root/'service.effects').read_text()=='2';rollback=True
-   print(json.dumps({'check':'real-user-systemd','status':'pass','fastJob':True,'longOneshotSeconds':16,'serviceAdoptedWithoutRestart':True,'ownerRestartReattached':True,'osRestartRetainedSameOwner':True,'serviceStoppedWithReceipt':True,'unknown':0,'quiescentOldBinaryRollback':rollback}))
+   application_control=False
+   if args.managed_control:
+    module_spec=importlib.util.spec_from_file_location('application_control_proof',args.managed_control.resolve(strict=True));assert module_spec and module_spec.loader
+    control=importlib.util.module_from_spec(module_spec);module_spec.loader.exec_module(control)
+    with socket.socket() as reserved:
+     reserved.bind(('127.0.0.1',0));port=reserved.getsockname()[1]
+    web=root/'http-worker.py';health=root/'http-health';health.write_text('true')
+    web.write_text('from http.server import BaseHTTPRequestHandler,HTTPServer\nfrom pathlib import Path\nimport sys\nclass Handler(BaseHTTPRequestHandler):\n def do_GET(self):\n  b=(\'{"ok":\'+Path(sys.argv[2]).read_text()+\'}\').encode();self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b)\n def log_message(self,*args):pass\nHTTPServer(("127.0.0.1",int(sys.argv[1])),Handler).serve_forever()\n');web.chmod(0o600)
+    name=tag+'-application.service';path=units/name;assert not path.exists()
+    body='[Unit]\nDescription=Disposable application handover proof\n[Service]\nType=simple\nExecStart=/usr/bin/python3 '+str(web)+' '+str(port)+' '+str(health)+'\nNoNewPrivileges=true\nMemoryMax=64M\nTasksMax=16\nTimeoutStopSec=5\nRestart=on-failure\n'
+    path.write_text(body);path.chmod(0o600);created.append((name,path,hashlib.sha256(body.encode()).hexdigest()))
+    probe={'url':f'http://127.0.0.1:{port}/health','status':200,'check':{'type':'json','equals':{'ok':True},'nonemptyArrays':[]},'intervalSeconds':1,'timeoutSeconds':1,'failureThreshold':1,'successThreshold':2}
+    policy['scopedUnits'].append({'unit':name,'scope':'user'});policy['systemdHttpReadiness']=[{'unit':name,'scope':'user',**{key:probe[key] for key in ['url','status','check']}}]
+    (state/'executors.json').write_text(json.dumps(policy));system('daemon-reload');system('start',name)
+    before=system('show',name,'--property=MainPID','--value')
+    manifest={'apiVersion':'cronharbor.dev/v1','kind':'Service','metadata':{'name':'services-api','namespace':'canarias-dev','labels':{'canarias.logical-id':'services:api'}},'spec':{'owner':'api','enabled':True,'execution':{'adapter':'systemd','systemd':{'unit':name}},'service':{'desiredState':'STOPPED','restart':'never','stopGraceSeconds':5,'startupGraceSeconds':3,'httpReadiness':probe}}}
+    request=control.LocalHarbor(state)
+    accepted=request({'action':'apply','definition':json.dumps(manifest),'expected_revision':None,'source_kind':'API','idempotency_key':str(uuid.uuid4())})
+    wait(lambda:request({'action':'operation','id':accepted['id']})['state']=='SUCCEEDED')
+    cli('services','start','canarias-dev/services-api');wait(lambda:current('services-api')['observed_state']=='READY')
+    assert system('show',name,'--property=MainPID','--value')==before
+    row=current('services-api');control.CATALOG={'api':{'unit':name,'manager':'user','httpReadiness':probe}}
+    binding={'component':'api','workloadId':row['id'],'revision':row['revision_id'],'unit':name,'manager':'user','httpReadiness':probe}
+    managed=control.ManagedServiceControl(binding,root/'application-control.json',request=request,unit_state=lambda unit:system('show',unit,'--property=ActiveState','--value'),ownership_fingerprint='a'*64,read_ownership_fingerprint=lambda:'a'*64,poll_seconds=.05)
+    managed.prepare();managed.set_desired('STOPPED',row['revision_id'],'switch-stop');assert system('show',name,'--property=ActiveState','--value')=='inactive'
+    health.write_text('false');failed=False
+    try:managed.restore_desired(row['revision_id'],'switch-start',timeout=10)
+    except control.UncertainControl:raise
+    except control.ControlError:failed=True
+    assert failed,'Unhealthy candidate incorrectly completed READY'
+    managed.set_desired('STOPPED',row['revision_id'],'rollback-stop');health.write_text('true')
+    managed.restore_desired(row['revision_id'],'rollback-start',timeout=15);managed.wait_ready()
+    assert json.loads((root/'application-control.json').read_text())['previousDesired']=='RUNNING'
+    managed.set_desired('STOPPED',row['revision_id'],'proof-final-stop');assert cli('status')['unknown']==0
+    application_control=True
+   print(json.dumps({'check':'real-user-systemd','status':'pass','fastJob':True,'longOneshotSeconds':16,'serviceAdoptedWithoutRestart':True,'ownerRestartReattached':True,'osRestartRetainedSameOwner':True,'serviceStoppedWithReceipt':True,'unknown':0,'quiescentOldBinaryRollback':rollback,'managedApplicationControl':application_control}))
+  except BaseException:
+   if args.managed_control and (root/'application-control.json').exists():
+    print(json.dumps({'applicationFailure':request({'action':'workload','id':binding['workloadId']}),'applicationUnit':system('show',binding['unit'],'--property=ActiveState,SubState,Result,NRestarts')}))
+   raise
   finally:
    try:stop()
    finally:

@@ -68,6 +68,7 @@ def mcp_check(state, token_file):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--browser", action="store_true")
+    parser.add_argument("--browser-grep", help="Run affected browser scenarios while reusing unchanged checks")
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="cronharbor-acceptance-", dir="/tmp") as temporary:
         private = Path(temporary)
@@ -229,7 +230,10 @@ def main():
                                    CRONHARBOR_E2E_TOKEN_FILE=str(browser_token),
                                    CRONHARBOR_E2E_VIEWER_TOKEN_FILE=str(private / "viewer.token"),
                                    CRONHARBOR_E2E_FILE_WORKLOAD=file_workload["id"], CRONHARBOR_E2E_REMOTE_URL="")
-                subprocess.run(["npm", "run", "e2e"], cwd=ROOT / "web/dashboard", env=environment, check=True, timeout=300)
+                environment["PLAYWRIGHT_HTML_OUTPUT_DIR"] = str(private / "browser-report")
+                browser_command=["npm", "run", "e2e", "--", "--output", str(private / "browser-results")]
+                if options.browser_grep:browser_command.extend(["--grep",options.browser_grep])
+                subprocess.run(browser_command, cwd=ROOT / "web/dashboard", env=environment, check=True, timeout=300)
                 ui = private / "dashboard"
                 shutil.copytree(ROOT / "web/dashboard/dist", ui)
                 (ui / "config.json").write_text(json.dumps({"apiBaseUrl": base + "/api/v1"}))
@@ -245,7 +249,7 @@ def main():
                 cli("tokens", "create", "--role", "admin", "--namespace", "*", "--capability", "*", "--output-file", str(origin_token))
                 environment.update(CRONHARBOR_DASHBOARD_URL=dashboard_origin, CRONHARBOR_E2E_REMOTE_URL=base + "/api/v1",
                                    CRONHARBOR_E2E_TOKEN_FILE=str(origin_token))
-                subprocess.run(["npm", "run", "e2e", "--", "e2e/origin.spec.ts", "--reporter=list", "--output=test-results/origin"], cwd=ROOT / "web/dashboard", env=environment, check=True, timeout=90)
+                subprocess.run(["npm", "run", "e2e", "--", "e2e/origin.spec.ts", "--reporter=list", "--output", str(private / "origin-results")], cwd=ROOT / "web/dashboard", env=environment, check=True, timeout=90)
                 dashboard.terminate()
                 dashboard.wait(timeout=15)
                 dashboard = None

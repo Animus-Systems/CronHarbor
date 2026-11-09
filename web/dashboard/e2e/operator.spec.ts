@@ -33,6 +33,7 @@ test("real API: editing a stopped systemd Service preserves HTTP readiness", asy
   await page.getByRole("link",{name,exact:true}).click();
   const edit=page.getByRole("link",{name:"Edit definition",exact:true});
   await edit.click();
+  await expect(page.getByLabel("Workload YAML definition")).toHaveValue(/"httpReadiness"/);
   const value:unknown=JSON.parse(await page.getByLabel("Workload YAML definition").inputValue());
   expect(value).toMatchObject({spec:{enabled:false,service:{desiredState:"STOPPED",httpReadiness}}});
 });
@@ -58,7 +59,7 @@ test("authentication is keyboard accessible and tokens are memory only", async (
     ),
   ).toBe(true);
   await page.screenshot({
-    path: "test-results/connection-mobile.png",
+    path: test.info().outputPath("connection-mobile.png"),
     fullPage: true,
   });
 });
@@ -133,12 +134,12 @@ test("real API: create, validate, apply, run, inspect evidence and bounded logs"
   await page.getByRole("button", { name: "Toggle navigation" }).click();
   await page.getByRole("link", { name: "Overview", exact: true }).click();
   await page.screenshot({
-    path: "test-results/overview-mobile.png",
+    path: test.info().outputPath("overview-mobile.png"),
     fullPage: true,
   });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({
-    path: "test-results/overview-desktop.png",
+    path: test.info().outputPath("overview-desktop.png"),
     fullPage: true,
   });
   await page.reload();
@@ -230,7 +231,7 @@ test("real API: manage service desired state, restart and stop through durable o
       .first(),
   ).toBeVisible();
   await page.screenshot({
-    path: "test-results/service-evidence-desktop.png",
+    path: test.info().outputPath("service-evidence-desktop.png"),
     fullPage: true,
   });
   await page
@@ -265,7 +266,7 @@ test("real API: scoped token creation is masked and revocation updates metadata"
     page.getByRole("heading", { name: "API tokens", exact: true }),
   ).toBeVisible();
   await page.screenshot({
-    path: "test-results/settings-health-desktop.png",
+    path: test.info().outputPath("settings-health-desktop.png"),
     fullPage: true,
   });
   await page.getByLabel("Lifetime · hours", { exact: true }).fill("1");
