@@ -8,6 +8,11 @@ Optional outbound alerts use a separately configured HTTPS receiver. Its [wire a
 
 ## HTTP contract
 
+Connections have a 60-second deadline renewed only by positive server response
+writes. Authenticated SSE heartbeats can keep an active stream open; partial
+request/header reads cannot extend it. Existing connection/stream admission,
+request deadlines, reauthorization and slow-subscriber backpressure remain bounded.
+
 The prefix is `/api/v1`. All operational routes require `Authorization: Bearer <token>`. Only `GET /health/live` is public and returns `{"live":true}`. `GET /health/ready` calls the same protected daemon status query. `GET /session` returns the authenticated principal and grants.
 
 | Method | Route | Input |

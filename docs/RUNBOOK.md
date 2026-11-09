@@ -1,6 +1,6 @@
 # Running CronHarbor
 
-The application is a single-node Rust scheduler, service supervisor and local command service with optional REST/SSE, read-only MCP and a static Vue dashboard. Software features and measured release acceptance are separate: see the verification record in `IMPLEMENTATION.md`.
+The application is a single-node Rust scheduler, service supervisor and local command service with optional REST/SSE, read-only MCP and a static Vue dashboard. Software features and measured release acceptance are separate: see the dated [verification record](VERIFICATION.md).
 
 ## Build and start the complete application
 
@@ -32,7 +32,9 @@ The Core build uses no TCP listener or frontend runtime:
 ./target/debug/cronharbor server --file examples/hello.yaml
 ```
 
-The `api` feature includes REST/SSE without MCP; `full` includes API and MCP. Vue builds to static assets and has no production Node.js server. Native full builds serve an explicit `--ui-dir`, or the built repository dashboard when present. API and MCP always call the daemon over its local socket.
+The `api` feature includes REST/SSE without MCP; `full` includes API, MCP and
+`http-probes` for allowlisted systemd HTTP readiness. Other builds can opt into
+`http-probes`; builds without it reject that manifest field. Vue builds to static assets and has no production Node.js server. Native full builds serve an explicit `--ui-dir`, or the built repository dashboard when present. API and MCP always call the daemon over its local socket.
 
 ### Installed systemd service
 

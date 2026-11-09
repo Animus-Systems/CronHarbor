@@ -90,7 +90,12 @@ Enter the private file's token in the dashboard. Remove that credential file whe
 | Core | `cargo build --locked` | Scheduler, supervisor, CLI, local Unix socket; no TCP listener or MCP |
 | Core + webhooks | `cargo build --locked --features webhooks` | Core with optional outbound HTTPS alerts; no TCP listener or MCP |
 | API | `cargo build --locked --features api` | Core plus authenticated REST/SSE and optional static UI hosting |
-| Full | `cargo build --locked --features full` | API plus read-only MCP; build Vue assets separately for source installs |
+| Full | `cargo build --locked --features full` | API, read-only MCP and bounded HTTP readiness for systemd Services; build Vue assets separately for source installs |
+
+Full includes `http-probes`; another profile can enable that feature explicitly.
+Builds without it reject HTTP readiness instead of ignoring the configuration.
+HTTP checks require an exact private unit/URL/status/assertion allowlist; see
+[systemd HTTP readiness](docs/RUNBOOK.md#http-readiness-for-a-systemd-service).
 
 API and Full include webhook support, activated only by daemon configuration. The Dockerfile has matching `core`, `api`, and `full` targets. Default `docker compose up --build -d` starts the headless Core profile. The Full image includes the built dashboard; no production Node.js server is needed.
 
@@ -174,7 +179,11 @@ Follow [AGENTS.md](AGENTS.md) for type safety, trust boundaries, migration rules
 
 Native jobs run as the daemon user and must be trusted. Process groups provide lifecycle cleanup, not an adversarial sandbox. Docker execution requires explicit policy and privileged daemon access; systemd units retain their existing OS protections. Remote HTTP deployments require a TLS reverse proxy and restricted backend access.
 
-The software is at version 0.11.1. Production migration, live systemd hardening, performance targets, and multi-architecture release certification still need deployment-specific evidence. Local test results are documented rather than presented as production guarantees.
+The software is at version 0.12.1. The verification record includes actual Linux
+DEV systemd adoption, HTTP readiness, application lifecycle and a two-minute
+uninterrupted operator dashboard session. Production migration, another host,
+performance targets and multi-architecture certification still need their own
+evidence. Local results are not production guarantees.
 
 ## License
 
