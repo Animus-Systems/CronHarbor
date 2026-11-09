@@ -130,6 +130,13 @@ Unresolved UNKNOWN logs remain protected from retention and still consume the co
 
 ## External executors and trust
 
+HTTP connections expire after 60 seconds without server response progress.
+Successful response writes, including authenticated SSE heartbeats, renew that
+deadline; partial request/header reads do not. Connection/stream quotas, request
+timeouts, event-stream reauthorization and slow-subscriber bounds still apply.
+Use a dedicated operator credential for the dashboard; the monitoring Observe
+credential has its own request budget and remains dedicated to reporting.
+
 ### HTTP readiness for a systemd Service
 
 Full builds include `http-probes`; another build can enable that feature explicitly.

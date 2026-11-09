@@ -251,7 +251,7 @@ pub async fn serve(
     .map_err(|_| Error::new("API_UNAVAILABLE", "API listener failed"))
 }
 
-// A whole-connection deadline also bounds clients that never finish HTTP headers.
+// Only response progress renews the deadline; slow request headers cannot keep a slot.
 struct DeadlineIo<S> {
     stream: S,
     deadline: Pin<Box<tokio::time::Sleep>>,
@@ -289,7 +289,15 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for DeadlineIo<S> {
                 "Connection deadline reached",
             )));
         }
-        Pin::new(&mut self.stream).poll_write(cx, bytes)
+        let result = Pin::new(&mut self.stream).poll_write(cx, bytes);
+        if let Poll::Ready(Ok(written)) = &result
+            && *written > 0
+        {
+            self.deadline
+                .as_mut()
+                .reset(tokio::time::Instant::now() + Duration::from_secs(60));
+        }
+        result
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stream).poll_flush(cx)
@@ -1687,6 +1695,47 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        });
+    }
+    #[test]
+    fn response_progress_keeps_a_live_event_connection_open() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (stream, mut peer) = tokio::io::duplex(128);
+            let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+            let mut stream = DeadlineIo {
+                stream,
+                deadline: Box::pin(tokio::time::sleep(Duration::from_millis(25))),
+                _permit: permit,
+            };
+            stream.write_all(b": heartbeat\n\n").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stream.write_all(b": heartbeat\n\n").await.unwrap();
+            let mut bytes = [0; 26];
+            peer.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b": heartbeat\n\n: heartbeat\n\n");
+        });
+    }
+    #[test]
+    fn partial_request_headers_do_not_extend_the_socket_deadline() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (stream, mut peer) = tokio::io::duplex(128);
+            let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+            let mut stream = DeadlineIo {
+                stream,
+                deadline: Box::pin(tokio::time::sleep(Duration::from_millis(25))),
+                _permit: permit,
+            };
+            peer.write_all(b"G").await.unwrap();
+            let mut bytes = [0; 1];
+            stream.read_exact(&mut bytes).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            peer.write_all(b"E").await.unwrap();
+            assert_eq!(
+                stream.read(&mut bytes).await.unwrap_err().kind(),
+                io::ErrorKind::TimedOut
+            );
         });
     }
     #[test]

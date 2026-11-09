@@ -454,3 +454,16 @@ Actual application handover remains a separateDEV acceptance stage. This evidenc
 does not claim production, another-host, VM reboot, signed-in business journeys,
 paid provider qualification, power-loss/OOM fault coverage or downgrade support for
 new HTTP definitions in older product binaries.
+
+### Live connection deadline regression — 2026-11-09
+
+The actual79-workload DEV browser check found a healthy operator SSE session
+disconnecting at60.1seconds, despite53HTTP200 responses and no API errors/writes.
+The existing absolute socket deadline expired during authenticated response traffic.
+Product0.12.1 renews it only on positive server response writes; request-header
+progress cannot renew it. The real duplex heartbeat regression failed first with
+TimedOut and now passes. Partial-header and absent-header deadline regressions pass.
+All336distinct all-feature/all-target Rust tests plus one nested proxy child passed,
+with zero skips/failures, followed by strict Clippy, format and eight repository
+checks. No dependency, contract, migration, dashboard input or security quota changed.
+Optimized artifact and live post-patch browser acceptance are recorded separately.
