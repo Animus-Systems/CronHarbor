@@ -2,6 +2,22 @@
 
 Dated entries distinguish current verification from historical runs. These results describe the local source and disposable fixtures. They do not certify a production installation or replace the remaining release gates.
 
+## Scoped execution history — 2026-11-16
+
+The scoped history query now uses the existing workload/time index while retaining
+the same authorization, ordering and pagination. An isolated planner regression
+failed before the change and passed afterward; scoped pagination with tied times,
+other namespaces and a later attempt also passed. A read-only same-snapshot DEV
+comparison returned identical rows for three workloads: the original query took
+428–1,542 ms and the indexed query 3–4 ms. These are samples, not a production SLA.
+
+The all-feature, all-target Rust suite passed 339 test results with one test thread,
+and formatting and strict Clippy passed. An earlier parallel suite had one unrelated
+Docker fixture fail because its temporary call log was absent; that case passed on
+its own and in the serial suite. The final pagination-test timeout guard was added
+after the serial suite, then its focused test was rerun. No dashboard code or
+generated public contract changed.
+
 ## Canarias admission changes — 2026-11-08 (local branch)
 
 Latest local checks: 296 Rust tests across 32 targets passed with no failures or

@@ -1260,6 +1260,16 @@ fn row_execution(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionDto> {
     })
 }
 const EXEC_SELECT: &str = "SELECT e.id,a.id,w.id,w.namespace,w.name,a.state,o.scheduled_at_us,a.started_at_us,a.finished_at_us,a.error_code,a.exit_code,COALESCE(l.truncated,0) FROM executions e JOIN attempts a ON a.execution_id=e.id JOIN workloads w ON w.id=e.workload_id LEFT JOIN occurrences o ON o.id=e.occurrence_id LEFT JOIN log_streams l ON l.attempt_id=a.id";
+fn execution_query(timestamp: &str, scoped: bool) -> String {
+    let workload = if scoped {
+        "e.workload_id=?1"
+    } else {
+        "(?1 IS NULL OR w.id=?1)"
+    };
+    format!(
+        "{EXEC_SELECT} WHERE a.attempt_index=(SELECT MAX(x.attempt_index) FROM attempts x WHERE x.execution_id=e.id) AND {workload} AND (?2 OR w.namespace IN(SELECT value FROM json_each(?3))) AND ({timestamp}<?4 OR({timestamp}=?4 AND e.id<?5)) AND (?6 IS NULL OR a.state='UNKNOWN' OR(a.state IN('FAILED','TIMED_OUT') AND a.finished_at_us>=?6)) ORDER BY {timestamp} DESC,e.id DESC LIMIT ?7"
+    )
+}
 fn execution(store: &Store, id: &str) -> Result<ExecutionDto> {
     store
         .connection
@@ -1298,9 +1308,7 @@ fn executions(
     } else {
         "e.created_at_us"
     };
-    let sql = format!(
-        "{EXEC_SELECT} WHERE a.attempt_index=(SELECT MAX(x.attempt_index) FROM attempts x WHERE x.execution_id=e.id) AND (?1 IS NULL OR w.id=?1) AND (?2 OR w.namespace IN(SELECT value FROM json_each(?3))) AND ({timestamp}<?4 OR({timestamp}=?4 AND e.id<?5)) AND (?6 IS NULL OR a.state='UNKNOWN' OR(a.state IN('FAILED','TIMED_OUT') AND a.finished_at_us>=?6)) ORDER BY {timestamp} DESC,e.id DESC LIMIT ?7"
-    );
+    let sql = execution_query(timestamp, workload_id.is_some());
     let mut q = store.connection.prepare(&sql)?;
     let mut items = q
         .query_map(
@@ -1666,4 +1674,37 @@ fn bind_service_operation(
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod execution_history_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scoped_history_uses_the_workload_index() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            execution_query("e.created_at_us", true)
+        );
+        let mut statement = store.connection.prepare(&sql).unwrap();
+        let plan: Vec<String> = statement
+            .query_map(
+                params!["fixture", true, "[]", i64::MAX, "", None::<i64>, 101],
+                |r| r.get(3),
+            )
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert!(
+            plan.iter().any(
+                |line| line.contains("SEARCH e USING INDEX idx_exec_workload_created")
+                    && line.contains("workload_id=?")
+            ),
+            "{plan:?}"
+        );
+    }
 }
