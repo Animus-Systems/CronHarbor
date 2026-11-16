@@ -509,3 +509,16 @@ Final unit/probe/independent-supervisor checks passed; disk148GiB used/130GiBfre
 9.9GiB available RAM, zero swap. Only verified unused build/package outputs were
 removed. These are actual DEV receipts; signed-in business/VM reboot/other-host/
 production acceptance remains unclaimed.
+
+## Local backup-client deadline regression — 2026-11-16
+
+A DEV snapshot of about 579 MB completed after the previous five-second local
+client deadline. Its manifest checksum and SQLite quick check passed; the
+timed-out command did not establish that the backup had failed. A local socket
+regression reproduced the premature timeout and passes with a 90-second
+backup-only response budget. A companion test confirms ordinary requests retain
+their five-second limit. Serial all-feature/all-target Rust checks passed 341
+tests; strict Clippy, formatting and eight repository checks passed. The
+dashboard and generated contracts were unchanged and were not rerun for this
+local-client change. The updated binary has not yet been deployed or verified
+against a live backup.
