@@ -335,6 +335,8 @@ need their own retention policies; they are not charged to this main-database ca
 
 Backups use SQLite's backup API, integrity/foreign-key checks, a SHA-256 manifest and private durable files. Preserve the previous binary/image digest. Schema migrations are monotonic and checksummed; an unsupported version/checksum fails closed. Never copy only a live WAL main file.
 
+The local backup command waits up to 90 seconds for its response. If the response is lost or times out, the backup may still have completed: inspect the named snapshot and manifest, verify their integrity and audit evidence, and reconcile the outcome before retrying. Do not assume a timeout means no backup was written.
+
 Schema version 3 bounded authentication rejection history; version 4 adds logical log streams, segments and the installation log policy; version 5 adds incident markers and the alert outbox. Upgrade preserves a private pre-migration database backup. Earlier supported snapshots upgrade under restore quarantine. Older binaries cannot open the new schema; rollback requires the matching older binary and a verified pre-upgrade snapshot, followed by normal restore reconciliation.
 
 Transfer the snapshot and its `.db.manifest.json` sidecar together. Both must be regular files owned by the restoring user with no group/other permissions or additional hard links. Symlink or FIFO sidecars are rejected before installation; preserve mode 0600 when archiving or moving backups.

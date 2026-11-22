@@ -67,6 +67,17 @@ fn transport_error() -> Error {
 }
 
 pub fn client(directory: &Path, request: Request) -> Result<Value> {
+    let response_budget = match &request {
+        Request::Execute { command, .. }
+            if matches!(
+                command.as_ref(),
+                crate::contracts::AppCommand::Backup { .. }
+            ) =>
+        {
+            Duration::from_secs(90)
+        }
+        _ => Duration::from_secs(5),
+    };
     let mut stream =
         UnixStream::connect(directory.join("control.sock")).map_err(|_| transport_error())?;
     let mut encoded = serde_json::to_vec(&request).map_err(|_| transport_error())?;
@@ -78,7 +89,7 @@ pub fn client(directory: &Path, request: Request) -> Result<Value> {
     }
     encoded.push(b'\n');
     write_frame(&mut stream, &encoded, Duration::from_secs(5))?;
-    let line = read_line(&mut stream, MAX_RESPONSE_BYTES + 1, Duration::from_secs(5))
+    let line = read_line(&mut stream, MAX_RESPONSE_BYTES + 1, response_budget)
         .map_err(|_| transport_error())?;
     let response: Response = serde_json::from_slice(&line).map_err(|_| transport_error())?;
     if let Some(error) = response.error {
@@ -1551,6 +1562,52 @@ esac
         );
         sender.join().unwrap();
         assert_eq!(decoded.unwrap()["text"].as_str().unwrap().len(), 65_536);
+    }
+
+    #[test]
+    fn backup_client_waits_for_a_slow_daemon_response() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let listener = UnixListener::bind(dir.path().join("control.sock")).unwrap();
+        let sender = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_line(&mut stream, 65_536, Duration::from_secs(5));
+            thread::sleep(Duration::from_secs(6));
+            let _ = write_frame(
+                &mut stream,
+                b"{\"data\":{\"name\":\"backup\"},\"error\":null}\n",
+                Duration::from_secs(5),
+            );
+        });
+        let response = client(
+            dir.path(),
+            Request::Execute {
+                command: Box::new(crate::contracts::AppCommand::Backup {
+                    name: "backup".into(),
+                }),
+                token: None,
+            },
+        );
+        sender.join().unwrap();
+        assert_eq!(response.unwrap()["name"], "backup");
+    }
+
+    #[test]
+    fn ordinary_client_still_rejects_a_slow_daemon_response() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let listener = UnixListener::bind(dir.path().join("control.sock")).unwrap();
+        let sender = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_line(&mut stream, 65_536, Duration::from_secs(5));
+            thread::sleep(Duration::from_secs(6));
+            let _ = write_frame(
+                &mut stream,
+                b"{\"data\":{},\"error\":null}\n",
+                Duration::from_secs(5),
+            );
+        });
+        let response = client(dir.path(), Request::Status);
+        sender.join().unwrap();
+        assert_eq!(response.unwrap_err().code, "LOCAL_TRANSPORT_UNAVAILABLE");
     }
 
     #[test]
