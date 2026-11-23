@@ -90,16 +90,25 @@ pub fn authenticate(store: &mut Store, token: Option<&str>) -> Result<Principal>
     })
 }
 pub fn execute(store: &mut Store, command: AppCommand, token: Option<&str>) -> Result<Value> {
-    let principal = authenticate(store, token)?;
+    let principal = authenticate_command(store, &command, token)?;
     let digest = format!(
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&command).map_err(|_| input("Cannot normalize command"))?
         )
     );
+    let result = dispatch(store, &principal, command, &digest, token.is_none());
+    audit_denial(store, &principal, result)
+}
+fn authenticate_command(
+    store: &mut Store,
+    command: &AppCommand,
+    token: Option<&str>,
+) -> Result<Principal> {
+    let principal = authenticate(store, token)?;
     let observed = principal.role == Role::Observe && !matches!(command, AppCommand::Identity);
     if observed {
-        let action = serde_json::to_value(&command)
+        let action = serde_json::to_value(command)
             .ok()
             .and_then(|value| {
                 value
@@ -116,13 +125,40 @@ pub fn execute(store: &mut Store, command: AppCommand, token: Option<&str>) -> R
             "REQUESTED",
         )?;
     }
-    let result = dispatch(store, &principal, command, &digest, token.is_none());
+    Ok(principal)
+}
+fn audit_denial<T>(store: &mut Store, principal: &Principal, result: Result<T>) -> Result<T> {
     if let Err(error) = &result
         && error.code == "NOT_AUTHORIZED"
     {
-        audit_command(store, &principal, "policy.deny", "command", "DENIED")?;
+        audit_command(store, principal, "policy.deny", "command", "DENIED")?;
     }
     result
+}
+pub(crate) fn admit_backup(
+    store: &mut Store,
+    name: &str,
+    token: Option<&str>,
+    busy: bool,
+) -> Result<Principal> {
+    let command = AppCommand::Backup { name: name.into() };
+    let principal = authenticate_command(store, &command, token)?;
+    let result = audit_backup_request(store, &principal, name, busy);
+    audit_denial(store, &principal, result)?;
+    Ok(principal)
+}
+fn audit_backup_request(store: &mut Store, p: &Principal, name: &str, busy: bool) -> Result<()> {
+    require_instance_operations(p)?;
+    if busy {
+        return Err(Error::new(
+            "BACKUP_BUSY",
+            "The daemon cannot accept another backup right now",
+        ));
+    }
+    audit_command(store, p, "backup.request", name, "ACCEPTED")
+}
+pub(crate) fn audit_backup_completion(store: &mut Store, p: &Principal, name: &str) -> Result<()> {
+    audit_command(store, p, "backup.complete", name, "SUCCEEDED")
 }
 fn control_capability(manifest: &Manifest) -> &'static str {
     if manifest.kind == "Service" {
@@ -1114,10 +1150,9 @@ fn dispatch(
             encode(Page { items, next_cursor })
         }
         AppCommand::Backup { name } => {
-            require_instance_operations(p)?;
-            audit_command(store, p, "backup.request", &name, "ACCEPTED")?;
+            audit_backup_request(store, p, &name, false)?;
             let backup = store.backup(&name)?;
-            audit_command(store, p, "backup.complete", &name, "SUCCEEDED")?;
+            audit_backup_completion(store, p, &name)?;
             Ok(backup)
         }
         AppCommand::GlobalPause { paused, evidence } => {

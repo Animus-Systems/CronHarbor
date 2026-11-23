@@ -134,6 +134,28 @@ fn check_compatible_schema(connection: &Connection, expected: u32) -> Result<()>
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) type BackupGate = (
+    PathBuf,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+#[cfg(test)]
+pub(crate) static BACKUP_GATE: std::sync::Mutex<Option<BackupGate>> = std::sync::Mutex::new(None);
+
+pub(crate) fn backup_read_only(
+    state_dir: &Path,
+    name: &str,
+    instance_id: &str,
+) -> Result<BackupResult> {
+    let connection = Connection::open_with_flags(
+        state_dir.join("state.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    connection.busy_timeout(Duration::ZERO)?;
+    backup(&connection, state_dir, name, instance_id)
+}
+
 pub fn backup(
     connection: &Connection,
     state_dir: &Path,
@@ -147,6 +169,21 @@ pub fn backup(
         ));
     }
     let state_dir = private_directory(state_dir)?;
+    #[cfg(test)]
+    {
+        let gate = {
+            let mut slot = BACKUP_GATE.lock().unwrap();
+            if slot.as_ref().is_some_and(|(path, ..)| *path == state_dir) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, started, release)) = gate {
+            started.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(15)).unwrap();
+        }
+    }
     let directory = private_directory(&state_dir.join("backups"))?;
     let path = directory.join(format!("{name}.db"));
     let manifest_path = sidecar(&path);

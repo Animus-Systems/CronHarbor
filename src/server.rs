@@ -276,6 +276,7 @@ pub fn run_with_settings(
     // UNKNOWN keeps its capacity reservation and original deadline across reattachment.
     let mut external_deadlines = BTreeMap::new();
     let mut cleanup: Option<(String, thread::JoinHandle<bool>)> = None;
+    let mut backup: Option<BackupTask> = None;
     let mut recovered_at = Instant::now() - Duration::from_secs(10);
     let mut retained_at = Instant::now();
     loop {
@@ -549,7 +550,15 @@ pub fn run_with_settings(
                 }),
             ));
         }
+        if backup
+            .as_ref()
+            .is_some_and(|backup| backup.task.is_finished())
+            && let Some(backup) = backup.take()
+        {
+            backup.respond(&mut store)?;
+        }
         if stopping
+            && backup.is_none()
             && native.is_empty()
             && pending.is_empty()
             && external
@@ -603,7 +612,7 @@ pub fn run_with_settings(
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let result = if peer_is_owner(&stream) {
-                        handle(&mut store, &mut stream, stopping)
+                        handle(&mut store, &mut stream, stopping, &mut backup)
                     } else {
                         Err(Error::new(
                             "NOT_AUTHORIZED",
@@ -615,31 +624,10 @@ pub fn run_with_settings(
                             watch.retired.store(true, Ordering::Relaxed);
                         }
                     }
-                    let response = match result {
-                        Ok(data) => Response {
-                            data: Some(data),
-                            error: None,
-                        },
-                        Err(error) => Response {
-                            data: None,
-                            error: Some(error),
-                        },
-                    };
-                    if let Ok(mut encoded) = serde_json::to_vec(&response) {
-                        if encoded.len()
-                            > usize::try_from(MAX_RESPONSE_BYTES).unwrap_or(2 * 1024 * 1024)
-                        {
-                            encoded = serde_json::to_vec(&Response {
-                                data: None,
-                                error: Some(Error::new(
-                                    "RESOURCE_EXHAUSTED",
-                                    "Response exceeds the bounded transport budget",
-                                )),
-                            })
-                            .map_err(|_| transport_error())?;
-                        }
-                        encoded.push(b'\n');
-                        let _ = write_frame(&mut stream, &encoded, Duration::from_secs(2));
+                    match result {
+                        Ok(Some(data)) => respond(&mut stream, Ok(data))?,
+                        Ok(None) => {} // The backup task owns the pending reply.
+                        Err(error) => respond(&mut stream, Err(error))?,
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -758,14 +746,14 @@ fn dispatch(
         match prepared {
             Ok(handle) => handle,
             Err(_) => {
-                store.finish(&launch, &Outcome::rejected(), crate::now_us())?;
+                store.reject_before_start(&launch, crate::now_us())?;
                 return Ok(());
             }
         }
     };
     if let Err(error) = store.persist_external_intent(&launch.attempt_id, &handle) {
         if error.code == "START_REJECTED" {
-            store.finish(&launch, &Outcome::rejected(), crate::now_us())?;
+            store.reject_before_start(&launch, crate::now_us())?;
             return Ok(());
         }
         return Err(error);
@@ -1165,7 +1153,69 @@ impl ExternalWatch {
     }
 }
 
-fn handle(store: &mut Store, stream: &mut UnixStream, paused: bool) -> Result<Value> {
+fn respond(stream: &mut UnixStream, result: Result<Value>) -> Result<()> {
+    let response = match result {
+        Ok(data) => Response {
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => Response {
+            data: None,
+            error: Some(error),
+        },
+    };
+    if let Ok(mut encoded) = serde_json::to_vec(&response) {
+        if encoded.len() > usize::try_from(MAX_RESPONSE_BYTES).unwrap_or(2 * 1024 * 1024) {
+            encoded = serde_json::to_vec(&Response {
+                data: None,
+                error: Some(Error::new(
+                    "RESOURCE_EXHAUSTED",
+                    "Response exceeds the bounded transport budget",
+                )),
+            })
+            .map_err(|_| transport_error())?;
+        }
+        encoded.push(b'\n');
+        let _ = write_frame(stream, &encoded, Duration::from_secs(2));
+    }
+    Ok(())
+}
+
+struct BackupTask {
+    stream: UnixStream,
+    name: String,
+    principal: crate::contracts::Principal,
+    task: thread::JoinHandle<Result<crate::ops::BackupResult>>,
+}
+impl BackupTask {
+    fn respond(self, store: &mut Store) -> Result<()> {
+        let Self {
+            mut stream,
+            name,
+            principal,
+            task,
+        } = self;
+        let result = task.join().unwrap_or_else(|_| {
+            Err(Error::new(
+                "STORAGE_UNAVAILABLE",
+                "Backup worker is unavailable",
+            ))
+        });
+        let result = result.and_then(|backup| {
+            crate::application::audit_backup_completion(store, &principal, &name)?;
+            serde_json::to_value(backup)
+                .map_err(|_| Error::new("INTERNAL_ERROR", "Cannot encode backup result"))
+        });
+        respond(&mut stream, result)
+    }
+}
+
+fn handle(
+    store: &mut Store,
+    stream: &mut UnixStream,
+    stopping: bool,
+    backup: &mut Option<BackupTask>,
+) -> Result<Option<Value>> {
     let bytes = read_line(
         stream,
         u64::try_from(MAX_REQUEST_BYTES).unwrap_or(2 * 1024 * 1024),
@@ -1173,12 +1223,36 @@ fn handle(store: &mut Store, stream: &mut UnixStream, paused: bool) -> Result<Va
     )?;
     let request: Request = serde_json::from_slice(&bytes)
         .map_err(|_| Error::new("INPUT_INVALID", "Invalid local command"))?;
-    match request {
-        Request::Execute { command, token } => {
-            crate::application::execute(store, *command, token.as_deref())
-        }
+    let result = match request {
+        Request::Execute { command, token } => match *command {
+            crate::contracts::AppCommand::Backup { name } => {
+                let principal = crate::application::admit_backup(
+                    store,
+                    &name,
+                    token.as_deref(),
+                    stopping || backup.is_some(),
+                )?;
+                let stream = stream.try_clone().map_err(|_| transport_error())?;
+                let directory = store.directory.clone();
+                let instance = store.instance_id()?;
+                let worker_name = name.clone();
+                let task = thread::Builder::new()
+                    .spawn(move || {
+                        crate::ops::backup_read_only(&directory, &worker_name, &instance)
+                    })
+                    .map_err(|_| Error::new("STORAGE_UNAVAILABLE", "Cannot start backup worker"))?;
+                *backup = Some(BackupTask {
+                    stream,
+                    name,
+                    principal,
+                    task,
+                });
+                return Ok(None);
+            }
+            command => crate::application::execute(store, command, token.as_deref()),
+        },
         Request::Status => {
-            serde_json::to_value(store.status(paused)?).map_err(|_| transport_error())
+            serde_json::to_value(store.status(stopping)?).map_err(|_| transport_error())
         }
         Request::Executions => {
             serde_json::to_value(store.history()?).map_err(|_| transport_error())
@@ -1192,7 +1266,8 @@ fn handle(store: &mut Store, stream: &mut UnixStream, paused: bool) -> Result<Va
                 json!({"attemptId":attempt_id,"text":log.text,"responseTruncated":log.response_truncated,"logTruncated":log.log_truncated,"retainedFromOffset":log.stream.retained_from_offset,"historyEvicted":log.stream.history_evicted,"nextOffset":log.next_offset,"untrusted":true}),
             )
         }
-    }
+    };
+    result.map(Some)
 }
 
 #[cfg(test)]
@@ -1562,6 +1637,123 @@ esac
         );
         sender.join().unwrap();
         assert_eq!(decoded.unwrap()["text"].as_str().unwrap().len(), 65_536);
+    }
+
+    #[test]
+    fn pre_start_systemd_rejection_settles_without_requesting_an_effect() {
+        use crate::contracts::AppCommand;
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("state")).unwrap();
+        let mut manifest = external_test_launch().manifest;
+        manifest.spec.execution.adapter = "systemd".into();
+        manifest.spec.execution.command.clear();
+        manifest.spec.execution.args.clear();
+        manifest.spec.execution.systemd = Some(crate::external::SystemdSpec {
+            unit: "worker.service".into(),
+        });
+        store.apply(&manifest, crate::now_us()).unwrap();
+        crate::application::execute(
+            &mut store,
+            AppCommand::Run {
+                id: format!("{}/{}", manifest.metadata.namespace, manifest.metadata.name),
+                idempotency_key: "pre-start-rejection".into(),
+            },
+            None,
+        )
+        .unwrap();
+        let launch = store.claim_due(crate::now_us()).unwrap().unwrap();
+        let attempt_id = launch.attempt_id.clone();
+        let mut pending = Vec::new();
+        dispatch(
+            &mut store,
+            launch,
+            &mut Vec::new(),
+            &mut pending,
+            &mut BTreeMap::new(),
+        )
+        .expect("a denied systemd launch must not escape the daemon loop");
+        assert!(pending.is_empty());
+        let (state, error, operation, started, start_requested): (String, String, String, Option<i64>, bool) = store.connection.query_row(
+            "SELECT a.state,a.error_code,o.state,a.started_at_us,EXISTS(SELECT 1 FROM audit_events WHERE target_id=a.id AND action='execution.start_requested') FROM attempts a JOIN operations o ON o.execution_id=a.execution_id WHERE a.id=?1",
+            [&attempt_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(
+            (state.as_str(), error.as_str(), operation.as_str()),
+            ("FAILED", "START_REJECTED", "FAILED")
+        );
+        assert_eq!(started, None);
+        assert!(!start_requested);
+    }
+
+    #[test]
+    fn slow_backup_does_not_block_daemon_and_has_one_audited_slot() {
+        use crate::contracts::AppCommand;
+        use std::sync::mpsc;
+
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let directory = temp.path().join("state");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let daemon = {
+            let directory = directory.clone();
+            let shutdown = Arc::clone(&shutdown);
+            thread::spawn(move || run_with_shutdown(&directory, &[], false, shutdown))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !directory.join("control.sock").exists() {
+            assert!(Instant::now() < deadline, "daemon socket did not appear");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let backup = |directory: &Path, name: &str| {
+            client(
+                directory,
+                Request::Execute {
+                    command: Box::new(AppCommand::Backup { name: name.into() }),
+                    token: None,
+                },
+            )
+        };
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        *crate::ops::BACKUP_GATE.lock().unwrap() = Some((directory.clone(), started, release_rx));
+        let first = {
+            let directory = directory.clone();
+            thread::spawn(move || backup(&directory, "slow"))
+        };
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let status = client(&directory, Request::Status);
+        let second = if status.is_ok() {
+            Some(backup(&directory, "overlap"))
+        } else {
+            None
+        };
+        release.send(()).unwrap();
+        let first = first.join().unwrap();
+        shutdown.store(true, Ordering::Relaxed);
+        daemon.join().unwrap().unwrap();
+
+        assert!(status.is_ok(), "status blocked behind backup: {status:?}");
+        assert_eq!(second.unwrap().unwrap_err().code, "BACKUP_BUSY");
+        assert_eq!(first.unwrap()["name"], "slow");
+        let database = rusqlite::Connection::open(directory.join("state.db")).unwrap();
+        let mut statement = database
+            .prepare("SELECT action,result FROM audit_events WHERE target_id='slow' ORDER BY seq")
+            .unwrap();
+        let audits = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            audits,
+            [
+                ("backup.request".into(), "ACCEPTED".into()),
+                ("backup.complete".into(), "SUCCEEDED".into())
+            ]
+        );
+        assert!(!directory.join("backups/overlap.db").exists());
     }
 
     #[test]

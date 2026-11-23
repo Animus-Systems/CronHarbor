@@ -846,16 +846,40 @@ impl Store {
             launch_nonce: launch.launch_nonce.clone(),
         })
     }
+    pub(crate) fn reject_before_start(&mut self, launch: &Launch, now: i64) -> Result<()> {
+        self.finish_attempt(launch, &crate::process::Outcome::rejected(), now, true)
+    }
     pub fn finish(
         &mut self,
         launch: &Launch,
         outcome: &crate::process::Outcome,
         now: i64,
     ) -> Result<()> {
+        self.finish_attempt(launch, outcome, now, false)
+    }
+    fn finish_attempt(
+        &mut self,
+        launch: &Launch,
+        outcome: &crate::process::Outcome,
+        now: i64,
+        before_start: bool,
+    ) -> Result<()> {
         let tx = self.connection.savepoint()?;
         let state = outcome.state.as_str();
         let finished = if state == "UNKNOWN" { None } else { Some(now) };
-        let changed=tx.execute("UPDATE attempts SET state=?1,error_code=?2,exit_code=?3,finished_at_us=?4 WHERE id=?5 AND state IN('START_REQUESTED','RUNNING','UNKNOWN')",params![state,outcome.error_code,outcome.exit_code,finished,launch.attempt_id])?;
+        let changed = tx.execute(
+            "UPDATE attempts SET state=?1,error_code=?2,exit_code=?3,finished_at_us=?4
+             WHERE id=?5 AND ((?6 AND state='LAUNCH_INTENT_RECORDED')
+               OR (NOT ?6 AND state IN('START_REQUESTED','RUNNING','UNKNOWN')))",
+            params![
+                state,
+                outcome.error_code,
+                outcome.exit_code,
+                finished,
+                launch.attempt_id,
+                before_start
+            ],
+        )?;
         if changed != 1 {
             return Err(Error::new(
                 "STATE_CONFLICT",
